@@ -14,6 +14,7 @@ from api.models.entry import (
     EntryCreate,
     EntryCreatedResponse,
     EntryListResponse,
+    EntryUpdate,
 )
 from api.repositories.interface_repository import DatabaseInterface
 from api.services.entry_service import EntryService
@@ -79,22 +80,15 @@ async def get_entry(entry_id: str, entry_service: EntryServiceDependency) -> Ent
 
 @router.patch("/entries/{entry_id}")
 async def update_entry(
-    entry_id: str, entry_update: dict[str, str], entry_service: EntryServiceDependency
+    entry_id: str, entry_update: EntryUpdate, entry_service: EntryServiceDependency
 ) -> Entry:
     """Update a journal entry."""
-    # TODO (Task 2): Replace ``entry_update: dict[str, str]`` with ``entry_update: EntryUpdate``
-    # (import the supplied model from ``api.models.entry``). Complete the shared
-    # EntryText string rules there; omission and null handling are already supplied.
-    # Then pass ``entry_update.model_dump(exclude_unset=True)`` to the service,
-    # which expects a dict. Passing the model itself fails; dumping every field
-    # would overwrite omitted fields with their defaults.
-    # An empty object is allowed and leaves the text fields unchanged.
-    # See ``TestUpdateEntry`` in tests/test_api.py and docs/06-input-validation.md.
-    result = await entry_service.update_entry(entry_id, entry_update)
-    if result is None:
+    updates = entry_update.model_dump(exclude_unset=True)
+    updated_entry = await entry_service.update_entry(entry_id, updates)
+    if updated_entry is None:
         raise HTTPException(status_code=404, detail="Entry not found")
 
-    return result
+    return updated_entry
 
 
 @router.delete("/entries/{entry_id}")
