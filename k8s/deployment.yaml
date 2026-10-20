@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: journal-api
+  labels:
+    app: journal-api
+spec:
+  replicas: 2  # Buena práctica para alta disponibilidad
+  selector:
+    matchLabels:
+      app: journal-api
+  template:
+    metadata:
+      labels:
+        app: journal-api
+    spec:
+      containers:
+      - name: journal-api
+        # Imagen de tu registro ECR
+        image: 607856468834.dkr.ecr.us-east-1.amazonaws.com/journal-api:latest
+        imagePullPolicy: Always  # Asegura que siempre tire la última versión del tag 'latest'
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: journal-secrets
+              key: DATABASE_URL
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: journal-secrets
+              key: OPENAI_API_KEY
+        - name: OPENAI_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: journal-secrets
+              key: OPENAI_BASE_URL
+        - name: OPENAI_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: journal-secrets
+              key: OPENAI_MODEL
