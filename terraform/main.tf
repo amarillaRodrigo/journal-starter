@@ -9,7 +9,7 @@ variable "aws_region" {
 }
 
 variable "image_tag" {
-  description = "Tag de la imagen en ECR. Usar el commit SHA corto para pinear una versión exacta (ej: -var=\"image_tag=3dc9a69\"), o 'latest' para el último build."
+  description = "Tag de la imagen en ECR. Usar el commit SHA completo para pinear una versión exacta, o 'latest'."
   type        = string
   default     = "latest"
 }
@@ -20,9 +20,16 @@ variable "project" {
   default     = "journal-api"
 }
 
+variable "github_repository" {
+  description = "Repositorio de GitHub autorizado a asumir el rol vía OIDC (owner/repo)"
+  type        = string
+  default     = "amarillaRodrigo/journal-starter"
+}
+
 locals {
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
   image        = "${local.ecr_registry}/${var.project}:${var.image_tag}"
+  repo_url     = "https://github.com/${var.github_repository}.git"
 }
 
 # ==========================================
@@ -80,17 +87,25 @@ resource "aws_security_group" "journal_sg" {
   description = "Security group for Journal API EC2 instance"
   vpc_id      = aws_vpc.journal_vpc.id
 
-  # Sin puerto 22: el acceso es vía AWS Systems Manager (SSM Session Manager).
+  # Sin puerto 22: la administración es vía AWS Systems Manager (SSM).
   ingress {
-    description = "API HTTP"
-    from_port   = 8000
-    to_port     = 8000
+    description = "HTTP (ACME + redirect a HTTPS)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS (API publica)"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
-    description = "Salida (ECR, SSM, dependencias)"
+    description = "Salida (ECR, SSM, ACME, dependencias)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -141,6 +156,106 @@ resource "aws_iam_instance_profile" "journal_ssm_profile" {
 }
 
 # ==========================================
+# IAM: GitHub Actions vía OIDC (sin credenciales estáticas)
+# ==========================================
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+
+  tags = {
+    Name = "${var.project}-github-oidc"
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name        = "journal-github-actions"
+  description = "Rol asumido por GitHub Actions (OIDC) para build y deploy de Journal API"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          # build corre en la rama main; deploy corre en el environment "production"
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:${var.github_repository}:ref:refs/heads/main",
+            "repo:${var.github_repository}:environment:production",
+          ]
+        }
+      }
+    }]
+  })
+
+  tags = {
+    Name = "${var.project}-github-actions"
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions" {
+  name = "${var.project}-github-actions-policy"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EcrLogin"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
+        Sid    = "EcrPush"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+        ]
+        Resource = aws_ecr_repository.journal_api.arn
+      },
+      {
+        Sid      = "ResolveInstance"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeInstances"]
+        Resource = "*"
+      },
+      {
+        Sid    = "DeployViaSsm"
+        Effect = "Allow"
+        Action = ["ssm:SendCommand"]
+        Resource = [
+          "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
+          "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript",
+        ]
+      },
+      {
+        Sid    = "ReadCommandResult"
+        Effect = "Allow"
+        Action = [
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommandInvocations",
+          "ssm:ListCommands",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+# ==========================================
 # ECR (registro de la imagen)
 # ==========================================
 
@@ -157,8 +272,25 @@ resource "aws_ecr_repository" "journal_api" {
   }
 }
 
+resource "aws_ecr_lifecycle_policy" "journal_api" {
+  repository = aws_ecr_repository.journal_api.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Mantener solo las últimas 15 imágenes"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 15
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
 # ==========================================
-# EC2 Instance
+# EC2 Instance (k3s + API + Postgres + Caddy)
 # ==========================================
 
 resource "aws_instance" "journal_api" {
@@ -168,69 +300,45 @@ resource "aws_instance" "journal_api" {
   vpc_security_group_ids = [aws_security_group.journal_sg.id]
   iam_instance_profile   = aws_iam_instance_profile.journal_ssm_profile.name
 
-  # Bootstrap: Docker + Postgres + API. Los secretos se leen de SSM Parameter
-  # Store en tiempo de arranque, nunca se hornean en la imagen.
+  # Bootstrap completo: swap, k3s, clonado del repo y primer deploy.
+  # Los secretos se leen de SSM Parameter Store en el deploy, nunca se hornean.
   user_data = <<-EOF
     #!/bin/bash
     set -euxo pipefail
-    REGION="${var.aws_region}"
-    IMG="${local.image}"
 
-    # --- Docker ---
-    dnf install -y docker
-    systemctl enable --now docker
+    # --- Swap: t3.micro tiene 1 GB de RAM y acá corre k3s + 3 pods ---
+    if [ ! -f /swapfile ]; then
+      dd if=/dev/zero of=/swapfile bs=1M count=2048
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
 
-    # --- ECR login (permisos vía instance profile) ---
-    aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin "${local.ecr_registry}"
-    docker pull $IMG
+    # --- k3s (Kubernetes ligero, sin Traefik/servicelb/metrics-server) ---
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --disable metrics-server --write-kubeconfig-mode 644" sh -
 
-    # --- Secretos desde SSM Parameter Store (SecureString) ---
-    PGPASS=$(aws ssm get-parameter --name /journal-api/POSTGRES_PASSWORD --with-decryption --query Parameter.Value --output text --region $REGION)
-    KAI=$(aws ssm get-parameter --name /journal-api/OPENAI_API_KEY --with-decryption --query Parameter.Value --output text --region $REGION)
-    KBU=$(aws ssm get-parameter --name /journal-api/OPENAI_BASE_URL --query Parameter.Value --output text --region $REGION)
-    KMO=$(aws ssm get-parameter --name /journal-api/OPENAI_MODEL --query Parameter.Value --output text --region $REGION)
-
-    # --- Red interna entre contenedores ---
-    docker network create journal-net || true
-
-    # --- Postgres ---
-    docker run -d --name journal-db --network journal-net --restart unless-stopped \
-      -e POSTGRES_USER=postgres \
-      -e POSTGRES_PASSWORD="$PGPASS" \
-      -e POSTGRES_DB=career_journal \
-      postgres:16-alpine
-
-    for i in $(seq 1 30); do
-      docker exec journal-db pg_isready -U postgres >/dev/null 2>&1 && break
-      sleep 2
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    for i in $(seq 1 60); do
+      kubectl get nodes 2>/dev/null | grep -q " Ready" && break
+      sleep 5
     done
+    kubectl get nodes
 
-    # --- Esquema ---
-    cat > /tmp/schema.sql <<'SQL'
-    CREATE TABLE IF NOT EXISTS entries (
-        id VARCHAR PRIMARY KEY,
-        data JSONB NOT NULL,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-        updated_at TIMESTAMP WITH TIME ZONE NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at);
-    CREATE INDEX IF NOT EXISTS idx_entries_data_gin ON entries USING GIN (data);
-    SQL
-    docker exec -i journal-db psql -U postgres -d career_journal < /tmp/schema.sql
+    # --- Código (repo público) y primer deploy ---
+    if [ ! -d /opt/journal-api/.git ]; then
+      git clone --depth 1 --branch main ${local.repo_url} /opt/journal-api
+    fi
+    chmod +x /opt/journal-api/scripts/deploy-k8s.sh
 
-    # --- API ---
-    docker run -d --name journal-api --network journal-net --restart unless-stopped \
-      -p 8000:8000 \
-      -e DATABASE_URL="postgresql://postgres:$PGPASS@journal-db:5432/career_journal" \
-      -e OPENAI_API_KEY="$KAI" \
-      -e OPENAI_BASE_URL="$KBU" \
-      -e OPENAI_MODEL="$KMO" \
-      $IMG
+    SHA=$(git -C /opt/journal-api rev-parse HEAD)
+    /opt/journal-api/scripts/deploy-k8s.sh "$SHA" || /opt/journal-api/scripts/deploy-k8s.sh latest
   EOF
 
   depends_on = [
     aws_iam_role_policy_attachment.ssm_core,
     aws_iam_role_policy_attachment.ecr_read,
+    aws_ecr_repository.journal_api,
   ]
 
   tags = {
@@ -264,9 +372,13 @@ output "public_ip" {
 }
 
 output "api_url" {
-  value = "http://${aws_eip.journal_eip.public_ip}:8000"
+  value = "https://${aws_eip.journal_eip.public_ip}.sslip.io"
 }
 
 output "ecr_image" {
   value = local.image
+}
+
+output "github_actions_role_arn" {
+  value = aws_iam_role.github_actions.arn
 }
