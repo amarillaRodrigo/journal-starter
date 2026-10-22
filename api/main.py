@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -8,6 +9,7 @@ from api.config import get_settings
 from api.logging_config import configure_logging
 from api.repositories.postgres_repository import PostgresDB
 from api.routers.journal_router import router as journal_router
+from api.telemetry import instrument_app
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +23,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
         logger.info("Application startup complete and ready to receive requests")
         try:
-            # TODO (Task 3): Log API readiness at INFO after the database is ready.
             yield
         finally:
-            # TODO (Task 3): Log API shutdown at INFO during cleanup.
             del app.state.database
             logger.info("Application shutdown complete")
 
@@ -35,3 +35,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(journal_router)
+
+
+@app.get("/version")
+async def get_version():
+    """Return the commit SHA the image was built from."""
+    return {"commit": os.environ.get("GIT_SHA", "unknown")}
+
+
+# ==========================================
+# OpenTelemetry FastAPI Instrumentation
+# ==========================================
+instrument_app(app)

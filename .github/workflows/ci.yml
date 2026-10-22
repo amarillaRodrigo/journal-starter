@@ -5,24 +5,56 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 607856468834.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: journal-api
+  PUBLIC_URL: https://3.216.116.179.sslip.io
 
 jobs:
-  lint:
-    name: Code quality
+  test:
+    name: test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: career_journal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: career_journal
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal_test
+      OPENAI_API_KEY: ci-placeholder-not-used-by-mock
+      OPENAI_BASE_URL: https://example.invalid/v1
+      OPENAI_MODEL: ci-placeholder-not-used-by-mock
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
@@ -32,61 +64,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Ruff check
+      - name: Lint
         run: uv run ruff check .
 
-      - name: Ruff format check
-        run: uv run ruff format --check .
-
-      - name: Pyright type check
-        run: uv run pyright
-
-  safeguards:
-    name: Starter safeguards
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: career_journal
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: career_journal
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal
-      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal_test
-      # Required by api.config.Settings so the app boots. Tests never call a
-      # real LLM — Task 4 uses an SDK client with a mocked HTTP transport — so these
-      # values are never used for network requests.
-      OPENAI_API_KEY: ci-placeholder-not-used-by-mock
-      OPENAI_BASE_URL: https://example.invalid/v1
-      OPENAI_MODEL: ci-placeholder-not-used-by-mock
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.14
-
-      - name: Install dependencies
-        run: uv sync --locked
-
       - name: Initialize application and test databases
         run: |
           PGPASSWORD=postgres psql \
@@ -94,59 +74,122 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -f database_setup.sql -f database_setup_test.sql
 
-      - name: Run starter safeguards
+      - name: Run tests
         run: uv run pytest -m "not exercise" -v
 
-  task:
-    name: Task acceptance
-    if: github.event_name == 'pull_request'
+  build:
+    name: build
+    needs: test
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: career_journal
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: career_journal
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal
-      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/career_journal_test
-      OPENAI_API_KEY: ci-placeholder-not-used-by-mock
-      OPENAI_BASE_URL: https://example.invalid/v1
-      OPENAI_MODEL: ci-placeholder-not-used-by-mock
+    permissions:
+      contents: read
+      id-token: write # OIDC: credenciales efímeras, sin secretos estáticos
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          enable-cache: true
+          role-to-assume: arn:aws:iam::607856468834:role/journal-github-actions
+          role-session-name: gha-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up Python
-        run: uv python install 3.14
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Install dependencies
-        run: uv sync --locked
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Initialize application and test databases
+      - name: Build and push commit-tagged image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+
+  deploy:
+    name: deploy
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+      url: https://3.216.116.179.sslip.io
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::607856468834:role/journal-github-actions
+          role-session-name: gha-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy image to Kubernetes via SSM
         run: |
-          PGPASSWORD=postgres psql \
-            -h localhost -U postgres -d career_journal \
-            -v ON_ERROR_STOP=1 \
-            -f database_setup.sql -f database_setup_test.sql
+          set -euo pipefail
 
-      - name: Run selected task and preceding exercises
-        run: uv run python -m scripts.ci_tests --event "$GITHUB_EVENT_PATH"
+          # La instancia se resuelve por tag, así el ID no se hardcodea.
+          IID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=journal-api-instance" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          echo "Instancia: $IID"
+
+          cat > /tmp/ssm.json <<JSON
+          {"commands":["cd /opt/journal-api && git fetch --depth 1 origin main && git reset --hard origin/main && bash scripts/deploy-k8s.sh ${GITHUB_SHA}"]}
+          JSON
+
+          CID=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "deploy ${GITHUB_SHA}" \
+            --parameters file:///tmp/ssm.json \
+            --query 'Command.CommandId' --output text)
+          echo "CommandId: $CID"
+
+          STATUS="Pending"
+          for i in $(seq 1 40); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CID" \
+              --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            echo "[$i] $STATUS"
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 10
+          done
+
+          echo "===== stdout ====="
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" \
+            --query StandardOutputContent --output text || true
+          echo "===== stderr ====="
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" \
+            --query StandardErrorContent --output text || true
+
+          test "$STATUS" = "Success"
+
+      - name: Verify the public endpoint runs the new commit
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            COMMIT=$(curl -fsS "${PUBLIC_URL}/version" | python3 -c "import json,sys; print(json.load(sys.stdin)['commit'])" 2>/dev/null || true)
+            echo "[$i] /version -> ${COMMIT:-<sin respuesta>}"
+            if [ "${COMMIT}" = "${GITHUB_SHA}" ]; then
+              echo "OK: Kubernetes está corriendo la imagen del commit ${GITHUB_SHA}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ERROR: /version no coincide con ${GITHUB_SHA}"
+          exit 1

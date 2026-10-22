@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import APIStatusError, APITimeoutError, OpenAIError, RateLimitError
 from pydantic import ValidationError
 
+from api.telemetry import tracer, entry_counter, request_counter
+
 from api.models.entry import (
     AnalysisResponse,
     DetailResponse,
@@ -58,8 +60,12 @@ async def create_entry(
     entry_data: EntryCreate, entry_service: EntryServiceDependency
 ) -> EntryCreatedResponse:
     """Create a new journal entry."""
-    created_entry = await entry_service.create_entry(entry_data)
-    return EntryCreatedResponse(detail="Entry created successfully", entry=created_entry)
+    with tracer.start_as_current_span("create_entry") as span:
+        span.set_attribute("entry.work", entry_data.work[:50])
+        created_entry = await entry_service.create_entry(entry_data)
+        entry_counter.add(1)
+        request_counter.add(1)
+        return EntryCreatedResponse(detail="Entry created successfully", entry=created_entry)
 
 
 @router.get("/entries")

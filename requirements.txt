@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+asyncpg
+pydantic>=2.13.4
+pydantic-settings
+openai>=2.53.0
+httpx>=0.28.1
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-exporter-otlp

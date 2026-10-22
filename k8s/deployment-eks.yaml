@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: journal-api
+  namespace: journal-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: journal-api
+  template:
+    metadata:
+      labels:
+        app: journal-api
+    spec:
+      containers:
+      - name: journal-api
+        image: 607856468834.dkr.ecr.us-east-1.amazonaws.com/journal-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:postgres@postgres:5432/career_journal"
+        - name: OPENAI_API_KEY
+          value: "sk-placeholder"
+        - name: OPENAI_BASE_URL
+          value: "https://api.openai.com/v1"
+        - name: OPENAI_MODEL
+          value: "gpt-4o-mini"

@@ -169,3 +169,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Kubernetes secrets con valores reales (usar secret.example.yaml como plantilla)
+k8s/secret.yaml
+
+# Terraform: estado local y providers descargados
+*.tfstate
+*.tfstate.*
+.terraform/
