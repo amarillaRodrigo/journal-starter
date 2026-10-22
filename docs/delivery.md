@@ -160,9 +160,9 @@ run_on_instance() {
 
 ## 4. ¿Lo desplegado es el commit actual?
 
-La trazabilidad se apoya en tres valores que deben coincidir **exactamente**:
+La trazabilidad se apoya en cuatro valores que deben coincidir **exactamente**:
 
-| Fuente | Comando | Valor actual |
+| Fuente | Comando | Verificado el 2026-10-22 (commit `2cfbc50`) |
 |---|---|---|
 | Commit local | `git rev-parse HEAD` | `2cfbc50e7fb2f0f24837ff67b82f9bc2cdc09a97` |
 | Tag de la imagen en ECR | `aws ecr describe-images --repository-name journal-api --image-ids imageTag=$(git rev-parse HEAD) --query 'imageDetails[0].imageTags' --output json` | `["2cfbc50e...","latest"]` |
@@ -189,7 +189,7 @@ Por qué funciona:
   propio e inmutable en la práctica; `latest` solo se usa para el primer
   arranque o para un rollback manual.
 
-Si los tres valores no coinciden, el diagnóstico está en
+Si los cuatro valores no coinciden, el diagnóstico está en
 [runbook.md](runbook.md#4-deploy-verde-pero-version-devuelve-otro-sha).
 
 ## 5. Runs de CI verificados
