@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -34,6 +35,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(journal_router)
+
+
+@app.get("/version")
+async def get_version():
+    """Return the commit SHA the image was built from."""
+    return {"commit": os.environ.get("GIT_SHA", "unknown")}
+
 
 # ==========================================
 # OpenTelemetry FastAPI Instrumentation

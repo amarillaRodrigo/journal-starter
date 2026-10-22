@@ -21,6 +21,11 @@ RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt || \
 # Copiar el código fuente
 COPY . .
 
+# Commit SHA con el que se construyó la imagen (se expone en GET /version).
+# Va al final para que cambiar el SHA no invalide la caché de dependencias.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # Exponer el puerto de la API
 EXPOSE 8000
 

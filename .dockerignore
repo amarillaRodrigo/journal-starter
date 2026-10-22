@@ -2,6 +2,15 @@
 .git
 .gitignore
 
+# Secretos reales y estado de infraestructura (nunca dentro de la imagen)
+.env
+.env.*
+!.env-sample
+k8s/secret.yaml
+terraform/
+*.tfstate
+*.tfstate.backup
+
 # Python
 __pycache__/
 *.py[cod]
