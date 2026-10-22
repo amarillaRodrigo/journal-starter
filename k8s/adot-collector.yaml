@@ -1,0 +1,138 @@
+# ADOT Collector: recibe OTLP de la API y exporta traces a X-Ray y metricas a
+# CloudWatch (EMF). Las credenciales salen del instance profile via IMDS
+# (metadata hop limit = 2, configurado en Terraform), sin secretos en el repo.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adot-collector-config
+  namespace: journal-api
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 128
+        spike_limit_mib: 32
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+
+    exporters:
+      awsxray:
+        region: us-east-1
+      awsemf:
+        region: us-east-1
+        namespace: JournalAPI
+        log_group_name: /aws/journal-api/metrics
+        log_stream_name: otel-metrics
+        # Sin rollup: los atributos de las metricas (status_class, route,
+        # db_operation) se convierten en dimensiones de CloudWatch y el
+        # resource no agrega dimensiones de alta cardinalidad (service.version).
+        dimension_rollup_option: NoDimensionRollup
+        resource_to_telemetry_conversion:
+          enabled: false
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [awsxray]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [awsemf]
+      telemetry:
+        logs:
+          level: info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adot-collector
+  namespace: journal-api
+  labels:
+    app: adot-collector
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: adot-collector
+  template:
+    metadata:
+      labels:
+        app: adot-collector
+    spec:
+      containers:
+        - name: adot-collector
+          image: public.ecr.aws/aws-observability/aws-otel-collector:v0.43.0
+          args:
+            - --config=/conf/config.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: health
+              containerPort: 13133
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "192Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: adot-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adot-collector
+  namespace: journal-api
+  labels:
+    app: adot-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: adot-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318

@@ -19,7 +19,7 @@ from api.models.entry import (
 from api.repositories.interface_repository import DatabaseInterface
 from api.services.entry_service import EntryService
 from api.services.llm_service import InvalidAnalysisResponseError, analyze_journal_entry
-from api.telemetry import entry_counter, request_counter, tracer
+from api.telemetry import entry_counter, tracer
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -60,10 +60,10 @@ async def create_entry(
 ) -> EntryCreatedResponse:
     """Create a new journal entry."""
     with tracer.start_as_current_span("create_entry") as span:
-        span.set_attribute("entry.work", entry_data.work[:50])
         created_entry = await entry_service.create_entry(entry_data)
+        # El id correlaciona con el span db.entries.insert; no se exporta texto del diario.
+        span.set_attribute("entry.id", created_entry.id)
         entry_counter.add(1)
-        request_counter.add(1)
         return EntryCreatedResponse(detail="Entry created successfully", entry=created_entry)
 
 

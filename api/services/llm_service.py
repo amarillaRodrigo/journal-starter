@@ -10,12 +10,15 @@ Settings are loaded by ``api.config.Settings``.
 """
 
 import json
+import time
 
 import httpx
 from openai import AsyncOpenAI
+from opentelemetry.trace import Status, StatusCode
 
 from api.config import get_settings
 from api.models.entry import AnalysisResponse
+from api.telemetry import analysis_duration, tracer
 
 
 class InvalidAnalysisResponseError(ValueError):
@@ -75,19 +78,36 @@ async def analyze_journal_entry(
             "Output valid JSON matching the schema."
         )
 
-        response = await client.responses.create(
-            model=get_settings().openai_model,
-            instructions=analysis_instructions,
-            input=entry_text,
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "journal_analysis",
-                    "strict": True,
-                    "schema": analysis_schema,
-                }
-            },
-        )
+        model = get_settings().openai_model
+        started = time.perf_counter()
+        with tracer.start_as_current_span("llm.analyze_entry") as span:
+            span.set_attribute("llm.provider", "openai")
+            span.set_attribute("llm.model", model)
+            span.set_attribute("entry.id", entry_id)
+            try:
+                response = await client.responses.create(
+                    model=model,
+                    instructions=analysis_instructions,
+                    input=entry_text,
+                    text={
+                        "format": {
+                            "type": "json_schema",
+                            "name": "journal_analysis",
+                            "strict": True,
+                            "schema": analysis_schema,
+                        }
+                    },
+                )
+                span.set_attribute("llm.response.status", response.status)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                raise
+            finally:
+                analysis_duration.record(
+                    (time.perf_counter() - started) * 1000,
+                    {"llm_model": model},
+                )
 
         if response.status != "completed":
             raise InvalidAnalysisResponseError("Analysis request was not completed")

@@ -177,3 +177,5 @@ k8s/secret.yaml
 *.tfstate
 *.tfstate.*
 .terraform/
+terraform.tfvars
+*.auto.tfvars

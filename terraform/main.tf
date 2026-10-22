@@ -20,6 +20,12 @@ variable "project" {
   default     = "journal-api"
 }
 
+variable "instance_type" {
+  description = "Tipo de instancia EC2. t3.small (2 GB) deja lugar para k3s + app + ADOT + Fluent Bit."
+  type        = string
+  default     = "t3.small"
+}
+
 variable "github_repository" {
   description = "Repositorio de GitHub autorizado a asumir el rol vía OIDC (owner/repo)"
   type        = string
@@ -298,10 +304,18 @@ resource "aws_ecr_lifecycle_policy" "journal_api" {
 
 resource "aws_instance" "journal_api" {
   ami                    = "ami-0856027a77429315a" # Amazon Linux 2023
-  instance_type          = "t3.micro"
+  instance_type          = var.instance_type
   subnet_id              = aws_subnet.journal_subnet.id
   vpc_security_group_ids = [aws_security_group.journal_sg.id]
   iam_instance_profile   = aws_iam_instance_profile.journal_ssm_profile.name
+
+  # IMDSv2 obligatorio y hop limit 2 para que los pods (ADOT/Fluent Bit)
+  # obtengan las credenciales del instance role sin secretos estaticos.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
 
   # Bootstrap completo: swap, k3s, clonado del repo y primer deploy.
   # Los secretos se leen de SSM Parameter Store en el deploy, nunca se hornean.

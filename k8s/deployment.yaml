@@ -62,6 +62,13 @@ spec:
                 secretKeyRef:
                   name: journal-secrets
                   key: OPENAI_MODEL
+            # Pipeline de observabilidad: app -> OTLP -> ADOT -> X-Ray/CloudWatch.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://adot-collector:4318
+            - name: OTEL_SERVICE_NAME
+              value: journal-api
+            - name: ENVIRONMENT
+              value: production
           readinessProbe:
             httpGet:
               path: /version

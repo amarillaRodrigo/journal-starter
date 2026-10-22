@@ -30,6 +30,11 @@ param() {
 echo "==> Namespace"
 kubectl apply -f k8s/namespace.yaml
 
+echo "==> Observabilidad (ADOT Collector + Fluent Bit)"
+kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml
+kubectl -n "${NAMESPACE}" rollout status deployment/adot-collector --timeout=180s
+kubectl -n "${NAMESPACE}" rollout status daemonset/fluent-bit --timeout=180s
+
 echo "==> Secretos desde SSM Parameter Store"
 PGPASS="$(param /journal-api/POSTGRES_PASSWORD --with-decryption)"
 OPENAI_KEY="$(param /journal-api/OPENAI_API_KEY --with-decryption)"
