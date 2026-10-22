@@ -146,8 +146,8 @@ aws logs tail /aws/journal-api/application --follow --region us-east-1
 > El exporter `awsemf` agrega la dimensión `OTelLib=<scope>`. El dashboard y las
 > alarmas la declaran explícitamente; si se omite, no matchean ninguna serie.
 
-> La suscripción email del topic SNS queda en `PendingConfirmation` hasta
-> confirmarla desde el correo de AWS.
+> La suscripción email del topic SNS está **confirmada (1 confirmed / 0 pending)**;
+> las alarmas entregan los avisos sin pasos manuales pendientes.
 
 ## Verificación
 

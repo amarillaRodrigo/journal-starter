@@ -129,6 +129,18 @@ breakdown are documented in **[docs/observability.md](docs/observability.md)**.
   provider has no quota or is unavailable; the failure is visible in traces,
   metrics and logs.
 
+## Documentación
+
+Deployment, operación y diagnóstico del entorno desplegado:
+
+- [Delivery setup](docs/delivery.md): cadena push → test → build → deploy y cómo
+  verificar que `/version` corresponde al commit actual.
+- [Deployment en EC2](docs/deployment-ec2.md): arquitectura, secretos en SSM,
+  deploy manual y Terraform.
+- [Observabilidad](docs/observability.md): pipeline ADOT/Fluent Bit, métricas,
+  logs, dashboard, alarmas y costos.
+- [Runbook de producción](docs/runbook.md): troubleshooting de pipeline, pods,
+  TLS, métricas, logs, alarmas y disco (todo por SSM; el puerto 22 está cerrado).
 
 ## License
 

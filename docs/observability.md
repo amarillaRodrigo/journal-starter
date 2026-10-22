@@ -233,9 +233,10 @@ Ambas usan `treat_missing_data = notBreaching` y notifican a `alarm_actions` y
 - Topic: `arn:aws:sns:us-east-1:607856468834:journal-api-alarms`
 - Suscripción email: definida en `var.alarm_email` (se pasa por
   `terraform/terraform.tfvars`, **gitignored**; el email no está en el repo).
-- Estado actual: `PendingConfirmation` — hay que abrir el mail de AWS y
-  confirmar la suscripción para recibir los avisos. La transición de estado de
-  las alarmas se verifica igual con `describe-alarms`.
+- Estado actual: **confirmada (1 confirmed / 0 pending)** — la suscripción está
+  activa y recibe los avisos de `alarm_actions` y `ok_actions`. La transición de
+  estado de las alarmas se verifica con `describe-alarms` y el envío con
+  `describe-alarm-history`.
 
 ```bash
 aws sns list-subscriptions-by-topic \
@@ -350,7 +351,6 @@ total subiría a ~$35/mes; de ahí la poda de cardinalidad.
 - El proveedor LLM devuelve `429 insufficient_quota` (sin crédito), por lo que
   `POST /entries/{id}/analyze` responde `503`. La traza y la métrica
   `journal.analysis.duration` se generan igual; el span queda con `fault`.
-- La suscripción SNS sigue `PendingConfirmation` hasta confirmar el email.
 - Las métricas EMF tardan ~1–2 minutos en aparecer en CloudWatch; una alarma de
   1 periodo reacciona en ese orden de magnitud.
 - Un solo nodo (`t3.small`) corre k3s + app + Postgres + ADOT + Fluent Bit. Es
