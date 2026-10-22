@@ -326,6 +326,7 @@ resource "aws_instance" "journal_api" {
     kubectl get nodes
 
     # --- Código (repo público) y primer deploy ---
+    dnf install -y git
     if [ ! -d /opt/journal-api/.git ]; then
       git clone --depth 1 --branch main ${local.repo_url} /opt/journal-api
     fi

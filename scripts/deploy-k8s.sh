@@ -48,12 +48,12 @@ kubectl -n "${NAMESPACE}" create secret generic journal-secrets \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo "==> Pull secret de ECR"
-aws ecr get-login-password --region "${REGION}" \
-  | kubectl -n "${NAMESPACE}" create secret docker-registry ecr-credential \
-      --docker-server="${REGISTRY}" \
-      --docker-username=AWS \
-      --docker-password-stdin \
-      --dry-run=client -o yaml | kubectl apply -f -
+ECR_TOKEN="$(aws ecr get-login-password --region "${REGION}")"
+ECR_AUTH="$(printf 'AWS:%s' "${ECR_TOKEN}" | base64 -w0)"
+kubectl -n "${NAMESPACE}" create secret generic ecr-credential \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-literal=.dockerconfigjson="{\"auths\":{\"${REGISTRY}\":{\"username\":\"AWS\",\"password\":\"${ECR_TOKEN}\",\"auth\":\"${ECR_AUTH}\"}}}" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 echo "==> Postgres, Service y Caddy"
 kubectl apply -f k8s/postgresql.yaml -f k8s/service.yaml -f k8s/caddy.yaml

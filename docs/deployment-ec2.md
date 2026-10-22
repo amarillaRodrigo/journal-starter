@@ -1,38 +1,62 @@
-# Despliegue containerizado en AWS EC2 (Terraform + ECR + SSM)
+# Despliegue en AWS: k3s + ECR + GitHub Actions
 
-Este documento describe el despliegue **actual** del capstone: la API de Journal
-corre como contenedor Docker en una instancia EC2, con PostgreSQL como contenedor
-en la misma instancia, y toda la infraestructura provisionada con Terraform.
+Arquitectura del capstone: la API corre en **Kubernetes (k3s)** sobre una instancia
+EC2, la imagen se construye y publica en **ECR** desde **GitHub Actions**, y el
+deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
 
 ## Arquitectura
 
 ```text
-Cliente público
-   │  HTTP :8000
-   ▼
-Internet Gateway
-   │
-   ▼
-EC2 t3.micro (Amazon Linux 2023)  ← Elastic IP 3.216.116.179
-   ├── journal-api  (contenedor, puerto 8000)   imagen de ECR
-   └── journal-db   (contenedor, postgres:16-alpine, red interna journal-net)
-   ▲
-   └── Acceso administrativo vía AWS Systems Manager (sin SSH, sin puerto 22)
+ push a main
+     │
+     ▼
+ GitHub Actions
+   ├── test    (ruff + pytest + Postgres service)
+   ├── build   (docker build → ECR, tag = commit SHA)   ← OIDC, sin secretos
+   └── deploy  (aws ssm send-command → rollout status)
+                        │
+                        ▼
+        EC2 t3.micro (Amazon Linux 2023) — Elastic IP 3.216.116.179
+          └── k3s (namespace journal-api)
+                ├── caddy            hostPort 80/443, TLS automático (Let's Encrypt)
+                ├── journal-api      Deployment (1 réplica), :8000
+                └── postgres         Deployment + PVC, :5432 (ClusterIP)
 ```
 
-* **Red:** VPC `10.0.0.0/16`, subnet pública `10.0.1.0/24`, IGW y route table.
-* **Acceso:** solo el puerto **8000** está abierto a Internet. El puerto 22 está cerrado;
-  la administración se hace con **SSM Run Command / Session Manager**.
-* **IAM:** `journal-ssm-role` con `AmazonSSMManagedInstanceCore` (SSM) y
-  `AmazonEC2ContainerRegistryReadOnly` (pull de ECR).
-* **Persistencia:** volumen de Docker del contenedor `journal-db`.
+**URL pública:** https://3.216.116.179.sslip.io
+
+**Puertos abiertos:** 80 y 443. El 22 está **cerrado**; la administración es por
+**SSM Run Command / Session Manager**.
+
+## Pipeline (`.github/workflows/ci.yml`)
+
+| Job | `name` / id | Qué hace |
+|---|---|---|
+| 1 | `test` | `ruff check`, inicializa las DBs y corre `pytest` contra un Postgres de servicio |
+| 2 | `build` | `needs: test` — build con `--build-arg GIT_SHA=${{ github.sha }}` y push a ECR con tags `<sha>` y `latest` |
+| 3 | `deploy` | `needs: build` — `environment: production` (url HTTPS), SSM Run Command: `git reset --hard origin/main` + `scripts/deploy-k8s.sh <sha>` y espera `rollout status` |
+
+**Autenticación cloud:** GitHub OIDC (`aws-actions/configure-aws-credentials`) asume
+`arn:aws:iam::607856468834:role/journal-github-actions`. No hay
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` en el repo ni en Secrets.
+
+El rol solo confía en:
+
+- `repo:amarillaRodrigo/journal-starter:ref:refs/heads/main` (job `build`)
+- `repo:amarillaRodrigo/journal-starter:environment:production` (job `deploy`)
+
+y solo permite: push a ECR, `ec2:DescribeInstances` y `ssm:SendCommand` /
+`GetCommandInvocation`.
+
+El último paso de `deploy` consulta `https://3.216.116.179.sslip.io/version` y
+falla si el `commit` devuelto no es el SHA del push.
 
 ## Secretos
 
-Ningún secreto se hornea en la imagen ni se escribe en Terraform:
+Nada sensible vive en el repo ni en la imagen (`.env`, `k8s/secret.yaml` y
+`terraform/` están en `.gitignore` y `.dockerignore`).
 
-* `.env` y `k8s/secret.yaml` están en `.gitignore` y en `.dockerignore`.
-* En AWS los secretos viven en **SSM Parameter Store** como `SecureString`:
+Los valores reales están en **SSM Parameter Store**:
 
 | Parámetro | Tipo |
 |---|---|
@@ -41,36 +65,29 @@ Ningún secreto se hornea en la imagen ni se escribe en Terraform:
 | `/journal-api/OPENAI_BASE_URL` | String |
 | `/journal-api/OPENAI_MODEL` | String |
 
-El `user_data` de la instancia los lee en el arranque con `aws ssm get-parameter
---with-decryption` y los inyecta como variables de entorno del contenedor.
+`scripts/deploy-k8s.sh` los lee con `--with-decryption` y crea los Secrets de
+Kubernetes (`journal-secrets`, `journal-db`) y el pull secret de ECR
+(`ecr-credential`) en cada deploy.
 
-Comandos para (re)cargar un secreto:
+## Deploy manual / troubleshooting
 
-```powershell
-aws ssm put-parameter --name /journal-api/OPENAI_API_KEY --value "sk-..." `
-  --type SecureString --overwrite --region us-east-1
+```bash
+# en la instancia (vía SSM Session Manager)
+cd /opt/journal-api
+git fetch origin main && git reset --hard origin/main
+sudo bash scripts/deploy-k8s.sh <commit-sha>
 ```
 
-## Build y push de la imagen
+Estado del cluster:
 
-La imagen recibe el commit SHA como `--build-arg`, queda en `ENV GIT_SHA` y se
-expone en `GET /version`.
-
-```powershell
-$sha = git rev-parse --short HEAD
-$reg = "607856468834.dkr.ecr.us-east-1.amazonaws.com"
-
-aws ecr get-login-password --region us-east-1 |
-  docker login --username AWS --password-stdin $reg
-
-docker build --build-arg GIT_SHA=$sha -t journal-api:$sha -t journal-api:latest .
-docker tag journal-api:$sha "$reg/journal-api:$sha"
-docker tag journal-api:$sha "$reg/journal-api:latest"
-docker push "$reg/journal-api:$sha"
-docker push "$reg/journal-api:latest"
+```bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl -n journal-api get pods,svc,pvc
+kubectl -n journal-api rollout status deployment/journal-api
+kubectl -n journal-api logs deploy/journal-api --tail=50
 ```
 
-## Infraestructura
+## Infraestructura (Terraform)
 
 ```powershell
 cd terraform
@@ -79,43 +96,34 @@ terraform plan
 terraform apply
 ```
 
-`terraform output` devuelve `api_url`, `public_ip`, `ecr_image` y `vpc_id`.
+Crea: VPC/subnet/IGW/route table, Security Group (80/443), IAM de instancia
+(SSM + ECR read), OIDC provider de GitHub + rol `journal-github-actions`,
+repositorio ECR + lifecycle policy, EC2 con `user_data` que instala k3s y
+despliega, y Elastic IP.
 
-Para pinear una versión exacta en la instancia:
+`terraform output` devuelve `api_url`, `public_ip`, `ecr_image` y
+`github_actions_role_arn`.
 
-```powershell
-terraform apply -var="image_tag=3dc9a69"
-```
-
-> Nota: cambiar `user_data` en una instancia existente **no** vuelve a ejecutarlo.
-> Para re-bootstrap completo hay que recrear la instancia (`terraform apply -replace=aws_instance.journal_api`).
-
-## Actualizar la aplicación (sin recrear infraestructura)
-
-```powershell
-# 1. build + push con el nuevo SHA (ver arriba)
-# 2. reemplazar el contenedor vía SSM (sin abrir SSH)
-aws ssm send-command --instance-ids <INSTANCE_ID> `
-  --document-name "AWS-RunShellScript" `
-  --parameters "commands=['sudo docker pull <ECR_IMAGE>:latest','sudo docker rm -f journal-api','sudo docker run -d --name journal-api --network journal-net --restart unless-stopped -p 8000:8000 -e DATABASE_URL=... <ECR_IMAGE>:latest']" `
-  --region us-east-1
-```
+> `user_data` solo corre en el primer arranque. Para re-bootstrap completo:
+> `terraform apply -replace=aws_instance.journal_api`.
 
 ## Verificación
 
 ```powershell
-Invoke-RestMethod http://3.216.116.179:8000/version   # {"commit":"<sha>"}
-Invoke-RestMethod http://3.216.116.179:8000/entries   # {"entries":[...],"count":N}
-Invoke-RestMethod http://3.216.116.179:8000/openapi.json
+Invoke-RestMethod https://3.216.116.179.sslip.io/version   # {"commit":"<sha>"}
+Invoke-RestMethod https://3.216.116.179.sslip.io/entries
+Invoke-RestMethod https://3.216.116.179.sslip.io/openapi.json
 ```
 
-Comprobar que la imagen no contiene secretos:
+Comprobar que la imagen no lleva secretos:
 
 ```powershell
-docker run --rm journal-api:latest ls -a /app   # no debe aparecer .env ni k8s/secret.yaml
+docker run --rm journal-api:latest sh -c "ls -a /app; ls /app/k8s"
 ```
 
-## Destruir la infraestructura
+## Costos y limpieza
+
+EC2 `t3.micro` + IPv4 público ≈ **$9–10/mes**. Para destruir todo:
 
 ```powershell
 cd terraform
