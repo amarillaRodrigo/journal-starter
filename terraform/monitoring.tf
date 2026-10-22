@@ -133,11 +133,14 @@ resource "aws_cloudwatch_dashboard" "journal" {
           stacked = false
           period  = 60
           stat    = "Sum"
+          # OTelLib es la dimension que el exporter awsemf agrega con el nombre del
+          # meter de OpenTelemetry. CloudWatch exige que el set de dimensiones del
+          # widget/alarma coincida exacto, por eso se declara siempre.
           metrics = [
-            ["JournalAPI", "journal.http.requests.total", "status_class", "2xx", { id = "m2", label = "2xx", stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "3xx", { id = "m3", label = "3xx", stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "4xx", { id = "m4", label = "4xx", stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "5xx", { id = "m5", label = "5xx", stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "2xx", { id = "m2", label = "2xx", stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "3xx", { id = "m3", label = "3xx", stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "4xx", { id = "m4", label = "4xx", stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "5xx", { id = "m5", label = "5xx", stat = "Sum" }],
           ]
           yAxis = {
             left = {
@@ -160,10 +163,10 @@ resource "aws_cloudwatch_dashboard" "journal" {
           period = 60
           stat   = "Sum"
           metrics = [
-            ["JournalAPI", "journal.http.requests.total", "status_class", "2xx", { id = "e2", visible = false, stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "3xx", { id = "e3", visible = false, stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "4xx", { id = "e4", visible = false, stat = "Sum" }],
-            ["JournalAPI", "journal.http.requests.total", "status_class", "5xx", { id = "e5", visible = false, stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "2xx", { id = "e2", visible = false, stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "3xx", { id = "e3", visible = false, stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "4xx", { id = "e4", visible = false, stat = "Sum" }],
+            ["JournalAPI", "journal.http.requests.total", "OTelLib", var.project, "status_class", "5xx", { id = "e5", visible = false, stat = "Sum" }],
             [{ expression = "100 * e5 / (e2 + e3 + e4 + e5)", label = "5xx (%)", id = "error_rate" }],
           ]
           yAxis = {
@@ -188,8 +191,8 @@ resource "aws_cloudwatch_dashboard" "journal" {
           period = 60
           stat   = "Average"
           metrics = [
-            ["JournalAPI", "journal.http.latency.p50", { id = "p50", label = "p50", stat = "Average" }],
-            ["JournalAPI", "journal.http.latency.p95", { id = "p95", label = "p95", stat = "Average" }],
+            ["JournalAPI", "journal.http.latency.p50", "OTelLib", var.project, { id = "p50", label = "p50", stat = "Average" }],
+            ["JournalAPI", "journal.http.latency.p95", "OTelLib", var.project, { id = "p95", label = "p95", stat = "Average" }],
           ]
           yAxis = {
             left = {
@@ -212,7 +215,7 @@ resource "aws_cloudwatch_dashboard" "journal" {
           period = 60
           stat   = "Sum"
           metrics = [
-            ["JournalAPI", "journal.entries.created", { id = "entries", label = "entries", stat = "Sum" }],
+            ["JournalAPI", "journal.entries.created", "OTelLib", var.project, { id = "entries", label = "entries", stat = "Sum" }],
           ]
           yAxis = {
             left = {
@@ -240,6 +243,37 @@ resource "aws_cloudwatch_dashboard" "journal" {
 }
 
 # ------------------------------------------
+# Queries guardadas (Logs Insights)
+# ------------------------------------------
+
+resource "aws_cloudwatch_query_definition" "errors" {
+  name = "${var.project}/errores-5xx"
+
+  log_group_names = [aws_cloudwatch_log_group.application.name]
+
+  query_string = <<-QUERY
+    fields @timestamp, @message
+    | filter @message like /ERROR/ or @message like / 5[0-9][0-9] /
+    | sort @timestamp desc
+    | limit 50
+  QUERY
+}
+
+resource "aws_cloudwatch_query_definition" "requests_by_route" {
+  name = "${var.project}/requests-por-ruta"
+
+  log_group_names = [aws_cloudwatch_log_group.application.name]
+
+  query_string = <<-QUERY
+    fields @timestamp, @message
+    | parse @message /(?<method>GET|POST|PATCH|DELETE) (?<path>\/[A-Za-z0-9\/{}_-]*) [^ ]* (?<status>[1-5][0-9][0-9]) /
+    | filter ispresent(status)
+    | stats count() as requests by path, status
+    | sort requests desc
+  QUERY
+}
+
+# ------------------------------------------
 # Alarmas
 # ------------------------------------------
 
@@ -248,7 +282,7 @@ resource "aws_cloudwatch_metric_alarm" "http_5xx" {
   alarm_description   = "Mas de 5 respuestas 5xx en 1 minuto"
   namespace           = "JournalAPI"
   metric_name         = "journal.http.requests.total"
-  dimensions          = { status_class = "5xx" }
+  dimensions          = { OTelLib = var.project, status_class = "5xx" }
   statistic           = "Sum"
   period              = 60
   evaluation_periods  = 1
@@ -266,6 +300,7 @@ resource "aws_cloudwatch_metric_alarm" "latency_p95" {
   alarm_description   = "p95 de latencia HTTP por encima de 2000 ms durante 3 minutos"
   namespace           = "JournalAPI"
   metric_name         = "journal.http.latency.p95"
+  dimensions          = { OTelLib = var.project }
   statistic           = "Average"
   period              = 60
   evaluation_periods  = 3

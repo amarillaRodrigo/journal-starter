@@ -1,5 +1,5 @@
-# Fluent Bit: un agente por nodo que envia los logs de todos los pods del
-# namespace journal-api a CloudWatch Logs. Usa el instance profile via IMDS.
+# Fluent Bit: un agente por nodo que envia los logs de los pods del namespace
+# journal-api a CloudWatch Logs. Usa el instance profile via IMDS.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -57,9 +57,17 @@ data:
         K8S-Logging.Parser  On
         K8S-Logging.Exclude On
 
+    # El tail lee /var/log/containers/*.log del nodo completo, asi que se
+    # reetiqueta solo lo que viene del namespace de la app para no enviar (ni
+    # pagar) los logs de kube-system.
+    [FILTER]
+        Name   rewrite_tag
+        Match  kube.*
+        Rule   $kubernetes['namespace_name'] ^journal-api$ journal.api false
+
     [OUTPUT]
         Name                cloudwatch_logs
-        Match               kube.*
+        Match               journal.api
         region              us-east-1
         log_group_name      /aws/journal-api/application
         log_stream_prefix   journal-api-

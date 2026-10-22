@@ -34,69 +34,99 @@ This is additional reference material for the capstone in case you want to explo
 > per-user data isolation. Do not expose it publicly or store personal or
 > sensitive journal content in it.
 
-## Phase 4 Capstone: Cloud Deployment Evidence
+## Cloud Deployment (EC2 + k3s + ECR + GitHub Actions)
 
 ### 1. Architecture Diagram & Traffic Paths
 
 ```text
-                      +-------------------------------------------------------+
-                      |                      AWS VPC                          |
-                      |                 (10.0.0.0/16)                         |
-                      |                                                       |
- [ Public Client ] ---> [ Internet Gateway ]                                  |
-   (HTTPS / 443)      |        |                                              |
-                      |        v (Public Subnet: 10.0.1.0/24)                 |
- [ Administrator ] ---> +---------------------------------------------------+ |
-   (SSH / 22)         | EC2 Instance (t3.micro - Ubuntu 24.04)              | |
-                      |   - Caddy Reverse Proxy (Auto-TLS for sslip.io)     | |
-                      |   - FastAPI / Uvicorn (Systemd daemonized)          | |
-                      |   - IAM Role: JournalApiEC2Role (Bedrock)           | |
-                      |   - SG: app-career-journal-sg                       | |
-                      +---------------------------------------------------+ |
-                               |                                              |
-                               | (Internal VPC Traffic: TCP 5432)             |
-                               v (Private Subnets: 10.0.10.0/24, 10.0.11.0/24)|
-                      +---------------------------------------------------+ |
-                      | RDS PostgreSQL 16 (db.t4g.micro)                  | |
-                      |   - Database: career_journal                        | |
-                      |   - Public Access: NO                               | |
-                      |   - Least-Privilege Role: api_user                  | |
-                      |   - SG: rds-career-journal-sg                       | |
-                      +---------------------------------------------------+ |
-                      +-------------------------------------------------------+
+                        +------------------------------------------------------+
+                        |                     AWS VPC (10.0.0.0/16)            |
+                        |                                                      |
+ [ Public Client ] ---> | Internet Gateway                                     |
+   (HTTPS / 443)        |        |                                             |
+                        |        v  Public Subnet 10.0.1.0/24                  |
+                        | +--------------------------------------------------+ |
+                        | | EC2 t3.small (Amazon Linux 2023)                 | |
+                        | | Elastic IP 3.216.116.179                         | |
+                        | |   k3s (namespace journal-api)                    | |
+                        | |     ├── caddy      hostPort 80/443, TLS (sslip)  | |
+                        | |     ├── journal-api Deployment :8000             | |
+                        | |     ├── postgres   Deployment + PVC :5432        | |
+                        | |     ├── adot-collector  OTLP :4318               | |
+                        | |     └── fluent-bit      DaemonSet                | |
+                        | |   IAM instance role: SSM + ECR read + X-Ray/CW   | |
+                        | +--------------------------------------------------+ |
+                        +------------------------------------------------------+
+                                  ▲                          │
+                                  │ SSM Run Command          │ OTLP / logs
+                                  │ (no inbound 22)          ▼
+                        GitHub Actions                X-Ray + CloudWatch + SNS
 ```
 
-**Traffic Paths:**
-1. Public Inbound Path: Public HTTPS traffic (port 443) enters through the Internet Gateway to Caddy on the EC2 instance, which proxies requests locally to FastAPI on port 8000.
-2. Private Application Path: Internal database queries flow from the EC2 instance in the public subnet to the private RDS tier over TCP port 5432.
-3. Administrative Path: Scoped SSH ingress (port 22) allowed strictly from the administrator's public IP address.
+**Traffic paths**
 
-### 2. Deployment Specification & Evidence
+1. **Public inbound:** HTTPS (443) → Internet Gateway → Caddy on the instance →
+   `journal-api` Service on port 8000.
+2. **Internal data:** `journal-api` → `postgres` ClusterIP on 5432 (in-cluster,
+   not exposed).
+3. **Administration:** GitHub Actions and operators use **AWS SSM Run Command /
+   Session Manager**; port 22 is closed.
+4. **Telemetry:** app → ADOT Collector (OTLP) → X-Ray + CloudWatch; pod stdout →
+   Fluent Bit → CloudWatch Logs.
 
-**Selected Cloud Services:**
-- **Compute & Ingress:** AWS EC2 (t3.micro) hosting Caddy reverse proxy and FastAPI application.
-- **Database:** AWS RDS PostgreSQL 16 (db.t4g.micro, 20 GB gp3).
-- **Networking:** Custom Amazon VPC (10.0.0.0/16) with 1 public subnet and 2 private subnets across multiple AZs (us-east-1a, us-east-1b).
-- **AI Service & Safety:** Amazon Bedrock (Anthropic Claude Haiku & Amazon Nova Lite) integrated with Amazon Bedrock Guardrails (journal-api-guardrail).
+**Selected cloud services**
 
-**Cost Controls & Budget:**
-- AWS Budget created with a $10.00 USD monthly threshold and email alerting. Expected baseline operating cost is ~$0.00 inside AWS Free Tier (or <$15.00/mo without Free Tier).
+- **Compute:** EC2 `t3.small` running k3s (single node).
+- **Registry:** Amazon ECR, image tag = commit SHA.
+- **Database:** PostgreSQL 16 in-cluster (Deployment + PVC).
+- **Ingress/TLS:** Caddy with automatic Let's Encrypt certificates for
+  `sslip.io`.
+- **Observability:** ADOT Collector, X-Ray, CloudWatch (metrics, logs,
+  dashboard, alarms) and SNS. See [docs/observability.md](docs/observability.md).
+- **Secrets:** SSM Parameter Store (`/journal-api/*`), read at deploy time.
 
-**Access Controls & Least-Privilege:**
-- `rds-career-journal-sg` accepts TCP 5432 strictly from `app-career-journal-sg`.
-- Database initialized with dedicated application role `api_user` restricted to DML (SELECT, INSERT, UPDATE, DELETE) on schema public.
-- Management ports: Database is completely non-routable from the public internet (`PubliclyAccessible: No`).
+### 2. CI/CD Pipeline
 
-**Verification Evidence:**
-- **Public HTTPS:** Validated via automated certificate issuance on https://98.81.98.31.sslip.io (HTTP/2 200).
-- **Private Tier Isolation:** Public attempt via `nc -zv -w 5 <RDS_ENDPOINT> 5432` confirmed connection timed out.
-- **Automated Contract Tests:**
-  - `POST /entries`: Passed with HTTP 201 returning generated UUID.
-  - `POST /entries/{id}/analyze`: Passed with HTTP 200 returning valid sentiment, summary, and topic list under 30 seconds.
+`.github/workflows/ci.yml` — jobs are named exactly `test`, `build`, `deploy`:
 
-### 3. Production Limitation & Mitigation
+| Job | What it does |
+|---|---|
+| `test` | `ruff check` + `pytest` against a Postgres service container (`OTEL_SDK_DISABLED=true`) |
+| `build` | `docker build --build-arg GIT_SHA=${{ github.sha }}` and push to ECR with tags `<sha>` and `latest` |
+| `deploy` | SSM Run Command → `git reset --hard origin/main` + `scripts/deploy-k8s.sh <sha>`, waits for rollouts and verifies `/version` returns the pushed SHA |
 
-- **Single Instance Single Point of Failure (SPOF):** The compute tier runs on a standalone EC2 instance within a single Availability Zone. For production readiness, this architecture should be migrated to an Application Load Balancer (ALB) across multiple AZs backing an Auto Scaling Group (ASG) or AWS ECS Fargate cluster to achieve automatic failover and zero-downtime scaling.
+Authentication is **GitHub OIDC** (`arn:aws:iam::607856468834:role/journal-github-actions`);
+there are no long-lived AWS keys in the repository or in GitHub Secrets.
+
+### 3. Observability
+
+| Signal | Backend | Where |
+|---|---|---|
+| Traces | AWS X-Ray | `journal-api` segment, custom `db.entries.*` and `llm.analyze_entry` subsegments |
+| Metrics | CloudWatch namespace `JournalAPI` | 15 series (requests by status, latency p50/p95, DB, LLM) |
+| Logs | CloudWatch Logs `/aws/journal-api/application` | Fluent Bit, only the `journal-api` namespace |
+| Dashboard | `journal-api` | <https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=journal-api> |
+| Alarms | `journal-api-http-5xx`, `journal-api-latency-p95` | SNS `journal-api-alarms` |
+
+Implementation details, saved queries, the end-to-end alarm test and the cost
+breakdown are documented in **[docs/observability.md](docs/observability.md)**.
+
+### 4. Cost Controls
+
+- AWS Budget with a $10.00 USD monthly threshold and email alerting.
+- Approximate operating cost: **~$17–18/month** (`t3.small` + public IPv4 +
+  CloudWatch/X-Ray/SNS), of which **~$9/month** is the observability increment.
+
+### 5. Production Limitations
+
+- **Single node:** k3s + app + database + agents run on one EC2 instance and one
+  AZ. A production design would use an ALB across AZs with an ASG or ECS/EKS,
+  and RDS for the database.
+- **No authentication or per-user isolation:** learning environment only.
+- **LLM dependency:** `POST /entries/{id}/analyze` returns `503` when the
+  provider has no quota or is unavailable; the failure is visible in traces,
+  metrics and logs.
+
 
 ## License
 
