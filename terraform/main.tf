@@ -30,6 +30,8 @@ locals {
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
   image        = "${local.ecr_registry}/${var.project}:${var.image_tag}"
   repo_url     = "https://github.com/${var.github_repository}.git"
+  gh_owner     = split("/", var.github_repository)[0]
+  gh_repo      = split("/", var.github_repository)[1]
 }
 
 # ==========================================
@@ -184,10 +186,11 @@ resource "aws_iam_role" "github_actions" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          # build corre en la rama main; deploy corre en el environment "production"
+          # GitHub agrega IDs inmutables al claim sub (owner@id/repo@id), por eso
+          # los comodines. build corre en main; deploy en el environment production.
           "token.actions.githubusercontent.com:sub" = [
-            "repo:${var.github_repository}:ref:refs/heads/main",
-            "repo:${var.github_repository}:environment:production",
+            "repo:${local.gh_owner}@*/${local.gh_repo}@*:ref:refs/heads/main",
+            "repo:${local.gh_owner}@*/${local.gh_repo}@*:environment:production",
           ]
         }
       }
