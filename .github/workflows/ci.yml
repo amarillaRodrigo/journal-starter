@@ -148,7 +148,7 @@ jobs:
           echo "Instancia: $IID"
 
           cat > /tmp/ssm.json <<JSON
-          {"commands":["cd /opt/journal-api && git fetch --depth 1 origin main && git reset --hard origin/main && bash scripts/deploy-k8s.sh ${GITHUB_SHA}"]}
+          {"commands":["cd /opt/journal-api && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD && bash scripts/deploy-k8s.sh ${GITHUB_SHA}"]}
           JSON
 
           CID=$(aws ssm send-command \

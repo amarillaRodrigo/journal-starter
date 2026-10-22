@@ -74,7 +74,7 @@ Kubernetes (`journal-secrets`, `journal-db`) y el pull secret de ECR
 ```bash
 # en la instancia (vía SSM Session Manager)
 cd /opt/journal-api
-git fetch origin main && git reset --hard origin/main
+git fetch --depth 1 origin main && git reset --hard FETCH_HEAD
 sudo bash scripts/deploy-k8s.sh <commit-sha>
 ```
 
