@@ -24,6 +24,16 @@ data:
       batch:
         timeout: 5s
         send_batch_size: 512
+      # Las metricas automaticas de FastAPI (http.server.*) traen 9 dimensiones
+      # por serie (host, puerto, target, flavor...). CloudWatch cobra por serie y
+      # las metricas journal.http.* ya cubren requests y latencia, asi que se
+      # descartan para evitar cardinalidad y costo. (HasPrefix/IsMatch no estan
+      # registrados en este build de ADOT; se comparan los nombres exactos.)
+      filter/metrics:
+        error_mode: ignore
+        metrics:
+          metric:
+            - 'name == "http.server.duration" or name == "http.server.response.size" or name == "http.server.request.size" or name == "http.server.active_requests"'
 
     exporters:
       awsxray:
@@ -53,7 +63,7 @@ data:
           exporters: [awsxray]
         metrics:
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, filter/metrics, batch]
           exporters: [awsemf]
       telemetry:
         logs:

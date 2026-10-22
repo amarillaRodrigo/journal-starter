@@ -114,8 +114,10 @@ breakdown are documented in **[docs/observability.md](docs/observability.md)**.
 ### 4. Cost Controls
 
 - AWS Budget with a $10.00 USD monthly threshold and email alerting.
-- Approximate operating cost: **~$17–18/month** (`t3.small` + public IPv4 +
-  CloudWatch/X-Ray/SNS), of which **~$9/month** is the observability increment.
+- Approximate operating cost: **~$25/month** on-demand (`t3.small` + EBS +
+  public IPv4 + ECR + CloudWatch/X-Ray/SNS), of which **~$4.90/month** is
+  observability and **~$7.59/month** is the resize from `t3.micro` to
+  `t3.small` needed to run k3s + app + database + agents.
 
 ### 5. Production Limitations
 

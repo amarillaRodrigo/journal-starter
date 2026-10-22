@@ -116,9 +116,10 @@ aws xray get-trace-summaries \
   --region us-east-1
 ```
 
-En la ventana de verificación X-Ray devolvió **128 trazas** con
-`service("journal-api")`, incluyendo `GET /entries`, `GET /entries/{id}`,
-`POST /entries`, `PATCH /entries/{id}` y `POST /entries/{id}/analyze`.
+En la ventana de verificación X-Ray devolvió **128 trazas** solo para requests a
+`/entries` (más las de `/version` de los probes), incluyendo `GET /entries`,
+`GET /entries/{id}`, `POST /entries`, `PATCH /entries/{id}` y
+`POST /entries/{id}/analyze`.
 
 ## 5.3 Métricas en CloudWatch
 
@@ -126,6 +127,14 @@ El exporter `awsemf` escribe documentos EMF en `/aws/journal-api/metrics` y
 CloudWatch los extrae al namespace `JournalAPI`. Se configuró
 `dimension_rollup_option: NoDimensionRollup` y
 `resource_to_telemetry_conversion: false` para no multiplicar series (costo).
+
+El collector además descarta las métricas automáticas `http.server.*` de
+`FastAPIInstrumentor` en el pipeline de métricas (`filter/metrics`): aportan 32
+series con 9 dimensiones cada una (host, puerto, target, flavor…) y no las usa
+ningún panel ni alarma, porque `journal.http.*` ya cubre requests y latencia.
+Con el filtro el namespace queda en **15 series** (~$4.50/mes) en lugar de 47
+(~$14/mes). Las series `http.server.*` ya publicadas dejan de recibir datos y
+desaparecen solas a los 15 días.
 
 > **Detalle importante:** el exporter agrega siempre la dimensión `OTelLib`
 > (nombre del scope de OpenTelemetry, `journal-api`). CloudWatch exige que el
@@ -321,14 +330,20 @@ la alarma evalúa la métrica real y no un estado vacío.
 
 ## Costos incrementales
 
+Precios on-demand de `us-east-1` (octubre 2026), instancia encendida 730 h/mes:
+
 | Ítem | Estimación |
 |---|---|
-| EC2 `t3.small` vs `t3.micro` | +$7.59/mes |
-| CloudWatch métricas custom (15 series) | ~$0.45/mes |
-| CloudWatch Logs ingesta (~50 MB/mes) + almacenamiento 7 días | ~$0.30/mes |
-| Alarmas (2) | $0.20/mes |
-| X-Ray (trazas muestreadas) | < $0.10/mes |
-| **Total incremental** | **≈ $8.6 – 9/mes** |
+| EC2 `t3.small` (vs `t3.micro`) | +$7.59/mes |
+| CloudWatch métricas custom (15 series × $0.30) | ~$4.50/mes |
+| CloudWatch Logs (ingesta ~50 MB + retención 7 días) | ~$0.10/mes |
+| Alarmas (2 × $0.10) | $0.20/mes |
+| X-Ray (trazas muestreadas) | ~$0.10/mes |
+| **Total incremental de observabilidad** | **≈ $4.90/mes** |
+| **Costo total del stack** (EC2 + EBS + IPv4 + ECR + observabilidad) | **≈ $25/mes** |
+
+Sin el filtro de `http.server.*` serían 47 series de métricas (~$14/mes) y el
+total subiría a ~$35/mes; de ahí la poda de cardinalidad.
 
 ## Limitaciones conocidas
 

@@ -165,9 +165,9 @@ docker run --rm journal-api:latest sh -c "ls -a /app; ls /app/k8s"
 
 ## Costos y limpieza
 
-EC2 `t3.small` + IPv4 público + observabilidad (CloudWatch, X-Ray, alarmas, SNS)
-≈ **$17–18/mes**, de los cuales ~$9 corresponden a observabilidad. Para destruir
-todo:
+EC2 `t3.small` + EBS + IPv4 público + observabilidad (CloudWatch, X-Ray,
+alarmas, SNS) ≈ **$25/mes** on-demand, de los cuales ~$4.90 corresponden a
+observabilidad. Para destruir todo:
 
 ```powershell
 cd terraform
