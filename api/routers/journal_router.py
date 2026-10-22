@@ -7,8 +7,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import APIStatusError, APITimeoutError, OpenAIError, RateLimitError
 from pydantic import ValidationError
 
-from api.telemetry import tracer, entry_counter, request_counter
-
 from api.models.entry import (
     AnalysisResponse,
     DetailResponse,
@@ -21,6 +19,7 @@ from api.models.entry import (
 from api.repositories.interface_repository import DatabaseInterface
 from api.services.entry_service import EntryService
 from api.services.llm_service import InvalidAnalysisResponseError, analyze_journal_entry
+from api.telemetry import entry_counter, request_counter, tracer
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
