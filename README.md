@@ -55,6 +55,7 @@ This is additional reference material for the capstone in case you want to explo
                         | |     ├── adot-collector  OTLP :4318               | |
                         | |     └── fluent-bit      DaemonSet                | |
                         | |   IAM instance role: SSM + ECR read + X-Ray/CW   | |
+                        | |   + Secrets Manager (2 scoped ARNs)           | |
                         | +--------------------------------------------------+ |
                         +------------------------------------------------------+
                                   ▲                          │
@@ -73,6 +74,11 @@ This is additional reference material for the capstone in case you want to explo
    Session Manager**; port 22 is closed.
 4. **Telemetry:** app → ADOT Collector (OTLP) → X-Ray + CloudWatch; pod stdout →
    Fluent Bit → CloudWatch Logs.
+5. **Secrets:** at deploy time the instance reads the credentials from **AWS
+   Secrets Manager** (`GetSecretValue` scoped to two exact ARNs) and writes them
+   into the Kubernetes `journal-secrets` / `journal-db` Secrets, which the pod
+   consumes as environment variables. The value never lives in the repo, in the
+   Terraform state, or in a plaintext file.
 
 **Selected cloud services**
 
@@ -83,7 +89,11 @@ This is additional reference material for the capstone in case you want to explo
   `sslip.io`.
 - **Observability:** ADOT Collector, X-Ray, CloudWatch (metrics, logs,
   dashboard, alarms) and SNS. See [docs/observability.md](docs/observability.md).
-- **Secrets:** SSM Parameter Store (`/journal-api/*`), read at deploy time.
+- **Secrets:** **AWS Secrets Manager** for the credentials
+  (`journal-api/credentials/database`, `journal-api/credentials/llm`), seeded
+  out of band by `scripts/migrate-secrets.sh`; SSM Parameter Store only for the
+  non-sensitive configuration (`/journal-api/{OPENAI_BASE_URL,OPENAI_MODEL,ACME_EMAIL}`).
+  See [docs/delivery.md](docs/delivery.md#3-ciclo-de-vida-de-los-secretos).
 
 ### 2. CI/CD Pipeline
 
@@ -93,7 +103,7 @@ This is additional reference material for the capstone in case you want to explo
 |---|---|
 | `test` | `ruff check` + `pytest` against a Postgres service container (`OTEL_SDK_DISABLED=true`) |
 | `build` | `docker build --build-arg GIT_SHA=${{ github.sha }}` and push to ECR with tags `<sha>` and `latest` |
-| `deploy` | SSM Run Command → `git reset --hard origin/main` + `scripts/deploy-k8s.sh <sha>`, waits for rollouts and verifies `/version` returns the pushed SHA |
+| `deploy` | resolves the public URL from the instance, then SSM Run Command → `git reset --hard FETCH_HEAD` + `scripts/deploy-k8s.sh <sha>`, waits for rollouts and verifies `/version` returns the pushed SHA |
 
 Authentication is **GitHub OIDC** (`arn:aws:iam::607856468834:role/journal-github-actions`);
 there are no long-lived AWS keys in the repository or in GitHub Secrets.
@@ -125,18 +135,20 @@ breakdown are documented in **[docs/observability.md](docs/observability.md)**.
   AZ. A production design would use an ALB across AZs with an ASG or ECS/EKS,
   and RDS for the database.
 - **No authentication or per-user isolation:** learning environment only.
-- **LLM dependency:** `POST /entries/{id}/analyze` returns `503` when the
-  provider has no quota or is unavailable; the failure is visible in traces,
-  metrics and logs.
+- **LLM dependency:** `POST /entries/{id}/analyze` returns `502` when the
+  provider rejects the request — no quota (`429 insufficient_quota`) or an
+  invalid key (`401`). The failure is visible in traces, metrics and logs;
+  the rest of the API keeps working.
 
 ## Documentación
 
 Deployment, operación y diagnóstico del entorno desplegado:
 
-- [Delivery setup](docs/delivery.md): cadena push → test → build → deploy y cómo
-  verificar que `/version` corresponde al commit actual.
-- [Deployment en EC2](docs/deployment-ec2.md): arquitectura, secretos en SSM,
-  deploy manual y Terraform.
+- [Delivery setup](docs/delivery.md): cadena push → test → build → deploy, ciclo
+  de vida de los secretos y cómo verificar que `/version` corresponde al commit
+  actual.
+- [Deployment en EC2](docs/deployment-ec2.md): arquitectura, secretos en Secrets
+  Manager, deploy manual y Terraform.
 - [Observabilidad](docs/observability.md): pipeline ADOT/Fluent Bit, métricas,
   logs, dashboard, alarmas y costos.
 - [Runbook de producción](docs/runbook.md): troubleshooting de pipeline, pods,

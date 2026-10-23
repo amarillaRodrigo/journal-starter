@@ -13,7 +13,7 @@ deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
  GitHub Actions
    ├── test    (ruff + pytest + Postgres service)
    ├── build   (docker build → ECR, tag = commit SHA)   ← OIDC, sin secretos
-   └── deploy  (aws ssm send-command → rollout status)
+   └── deploy  (resolve URL pública + aws ssm send-command → rollout status)
                         │
                         ▼
         EC2 t3.small (Amazon Linux 2023) — Elastic IP 3.215.52.10
@@ -23,7 +23,16 @@ deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
                 ├── postgres         Deployment + PVC, :5432 (ClusterIP)
                 ├── adot-collector   OTLP :4318 → X-Ray + CloudWatch (EMF)
                 └── fluent-bit       DaemonSet → CloudWatch Logs
+
+  En cada deploy el nodo arma los secretos del pod:
+
+     Secrets Manager ──GetSecretValue (2 ARN exactos)──┐
+     SSM Parameter Store ──GetParameter (solo config)───┴──► Secret de k8s ──► env vars
 ```
+
+> El **volumen raíz es de 20 GB gp3 cifrado**: el default de 8 GB del `t3.small`
+> no alcanza porque containerd conserva una imagen por commit (el tag es el
+> SHA) y al 15 % de espacio libre el kubelet entra en `DiskPressure`.
 
 **URL pública:** https://3.215.52.10.sslip.io
 
@@ -36,7 +45,7 @@ deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
 |---|---|---|
 | 1 | `test` | `ruff check`, inicializa las DBs y corre `pytest` contra un Postgres de servicio |
 | 2 | `build` | `needs: test` — build con `--build-arg GIT_SHA=${{ github.sha }}` y push a ECR con tags `<sha>` y `latest` |
-| 3 | `deploy` | `needs: build` — `environment: production` (url HTTPS), SSM Run Command: `git reset --hard origin/main` + `scripts/deploy-k8s.sh <sha>` y espera `rollout status` |
+| 3 | `deploy` | `needs: build` - `environment: production` (url HTTPS), resolución de la IP pública desde la instancia y SSM Run Command: `git reset --hard FETCH_HEAD` + `scripts/deploy-k8s.sh <sha>` y espera `rollout status` |
 
 **Autenticación cloud:** GitHub OIDC (`aws-actions/configure-aws-credentials`) asume
 `arn:aws:iam::607856468834:role/journal-github-actions`. No hay
