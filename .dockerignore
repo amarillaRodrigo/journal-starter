@@ -49,7 +49,9 @@ Thumbs.db
 docs/
 
 # Scripts de desarrollo
-scripts/
+# NO se excluye scripts/: fetch_secrets.py corre como init container de la
+# app y desde ahi baja los secretos a un emptyDir del pod. Sin esta linea el
+# init container no encontraria el script.
 
 # Pruebas
 tests/

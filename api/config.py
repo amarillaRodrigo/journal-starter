@@ -1,4 +1,5 @@
 from functools import lru_cache
+from os import environ
 
 from pydantic import Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,6 +40,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         hide_input_in_errors=True,
+        # En produccion el init container deja los secretos en un emptyDir del
+        # pod (SECRETS_DIR=/secrets) y la app los lee de ahi como archivos.
+        # Asi el material sensible nunca entra al Secret de Kubernetes (etcd,
+        # base64) ni al spec del pod.
+        # Se lee de la variable de entorno para que en local, donde el
+        # directorio no existe, la fuente no aporte nada ni avise.
+        secrets_dir=environ.get("SECRETS_DIR"),
     )
 
     @field_validator("database_url")

@@ -4,3 +4,18 @@ metadata:
   name: journal-api
   labels:
     app.kubernetes.io/part-of: journal-api
+---
+# ServiceAccount propia de la app. El token proyectado que Kubernetes monta en
+# el pod es lo que da identidad al pod: su 'sub'
+# (system:serviceaccount:journal-api:journal-api) se usa como ExternalId del
+# AssumeRole con el que la app baja sus secretos.
+#
+# El Secret de service account que se crea con esto NO contiene credenciales
+# de AWS: es un token firmado por el cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: journal-api
+  namespace: journal-api
+  labels:
+    app.kubernetes.io/part-of: journal-api

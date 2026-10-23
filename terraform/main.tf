@@ -388,7 +388,8 @@ resource "aws_instance" "journal_api" {
     # arranque, o el bootstrap falla.
     aws_secretsmanager_secret.database,
     aws_secretsmanager_secret.llm,
-    aws_iam_role_policy.instance_secrets,
+    aws_iam_role_policy.instance_delegate,
+    aws_iam_role.journal_api_runtime_role,
   ]
 
   tags = {

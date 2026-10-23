@@ -28,6 +28,8 @@ kind: Deployment
 metadata:
   name: postgres
   namespace: journal-api
+  labels:
+    app: postgres
 spec:
   replicas: 1
   strategy:
@@ -40,6 +42,37 @@ spec:
       labels:
         app: postgres
     spec:
+      # Misma ServiceAccount que la app: su 'sub' es el ExternalId que la
+      # trust policy del rol de servicio acepta.
+      serviceAccountName: journal-api
+      initContainers:
+        # Postgres toma la password de un archivo (POSTGRES_PASSWORD_FILE), no
+        # de una variable de entorno: asi no queda en el spec del pod, que es
+        # legible por cualquiera con get pods.
+        - name: fetch-secrets
+          # El tag se sustituye en el deploy (scripts/deploy-k8s.sh) por el commit SHA.
+          image: 607856468834.dkr.ecr.us-east-1.amazonaws.com/journal-api:placeholder
+          command:
+            - python
+            - /app/scripts/fetch_secrets.py
+            - journal-api/credentials/database
+          env:
+            - name: AWS_RUNTIME_ROLE_ARN
+              value: arn:aws:iam::607856468834:role/journal-api-runtime-role
+            - name: AWS_REGION
+              value: us-east-1
+            - name: SECRETS_DIR
+              value: /secrets
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
       containers:
         - name: postgres
           image: postgres:16-alpine
@@ -48,11 +81,8 @@ spec:
               value: "postgres"
             - name: POSTGRES_DB
               value: "career_journal"
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: journal-db
-                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_PASSWORD_FILE
+              value: /secrets/POSTGRES_PASSWORD
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           ports:
@@ -72,7 +102,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: postgres-data
+        - name: secrets
+          emptyDir:
+            medium: Memory

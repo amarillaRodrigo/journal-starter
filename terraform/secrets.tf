@@ -7,16 +7,16 @@
 #
 # Por qué: si el valor estuviera en una `aws_secretsmanager_secret_version` o en
 # una variable de `terraform.tfvars`, quedaría en TEXTO PLANO dentro de
-# terraform.tfstate y terraform.tfstate.backup, que son archivos en disco en el
-# repositorio de trabajo. Mover un secreto de "archivo" a "Secrets Manager"
-# mientras se lo deja en el estado no cambia nada.
+# terraform.tfstate y terraform.tfstate.backup, que son archivos en disco.
+# Mover un secreto de "archivo" a Secrets Manager mientras se lo deja en el
+# estado no cambia nada.
 #
 # El valor real se siembra UNA SOLA VEZ, fuera de banda:
 #
 #     python scripts/migrate_secrets.py
 #
-# Ese script lee los parámetros de SSM (con --with-decryption) y los escribe en
-# Secrets Manager. Terraform nunca ve el valor.
+# Ese script lee los parámetros de SSM (con --with-decryption) y los escribe
+# en Secrets Manager. Terraform nunca lo ve.
 
 locals {
   secret_names = {
@@ -40,6 +40,11 @@ locals {
     "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/journal-api/OPENAI_MODEL",
     "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/journal-api/ACME_EMAIL",
   ]
+
+  # 'sub' del token de ServiceAccount del pod de la app. Se usa como
+  # ExternalId del AssumeRole: un pod de otro namespace, o con otra
+  # ServiceAccount, produce otro 'sub' y por lo tanto no puede asumir el rol.
+  service_account_subject = "system:serviceaccount:${var.project}:journal-api"
 }
 
 resource "aws_secretsmanager_secret" "database" {
@@ -66,6 +71,115 @@ resource "aws_secretsmanager_secret" "llm" {
 }
 
 # ==========================================
+# Identidad de servicio de la aplicación
+# ==========================================
+#
+# La app NO usa las credenciales de la instancia: asume su propio rol, acotado
+# a leer los dos secretos del proyecto y nada más.
+#
+# El rol de la instancia (journal-ssm-role) pierde el acceso directo a los
+# secretos y solo puede DELEGAR en este rol. Asi, si un pod o un proceso del
+# nodo obtains las credenciales del instance profile, no puede leer los
+# secretos: tiene que pasar por el AssumeRole con el ExternalId correcto.
+
+resource "aws_iam_role" "journal_api_runtime_role" {
+  name        = "journal-api-runtime-role"
+  description = "Identidad de servicio de la app: lee los dos secretos del proyecto y nada mas"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { AWS = aws_iam_role.journal_ssm_role.arn }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "sts:ExternalId" = local.service_account_subject
+        }
+      }
+    }]
+  })
+
+  tags = {
+    Name = "${var.project}-runtime-role"
+  }
+}
+
+resource "aws_iam_role_policy" "runtime_secrets" {
+  name = "${var.project}-runtime-secrets-policy"
+  role = aws_iam_role.journal_api_runtime_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "ReadOnlyScopedSecrets"
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret",
+      ]
+      Resource = [
+        aws_secretsmanager_secret.database.arn,
+        aws_secretsmanager_secret.llm.arn,
+      ]
+    }]
+  })
+}
+
+# ==========================================
+# IAM del instance profile: delegar, no leer
+# ==========================================
+
+resource "aws_iam_role_policy" "instance_delegate" {
+  name = "${var.project}-instance-delegate-policy"
+  role = aws_iam_role.journal_ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "DelegateToRuntimeRole"
+        Effect   = "Allow"
+        Action   = ["sts:AssumeRole"]
+        Resource = aws_iam_role.journal_api_runtime_role.arn
+        Condition = {
+          StringEquals = {
+            "sts:ExternalId" = local.service_account_subject
+          }
+        }
+      },
+      {
+        # El rol de la instancia NO puede leer secretos: solo delegar en el rol
+        # de la app. Esto no afecta a la sesion asumida (que se evalua contra
+        # las politicas del rol de destino, no contra las de este).
+        Sid      = "DenyDirectSecretAccess"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = "*"
+      },
+      {
+        # AmazonSSMManagedInstanceCore concede ssm:GetParameters sobre "*".
+        # OPENAI_BASE_URL y OPENAI_MODEL no son secretos (siguen en SSM como
+        # String porque son configuracion publica), pero no hay motivo para que
+        # la instancia pueda leer cualquier parametro de la cuenta.
+        #
+        # Caveat: el SSM Agent no usa GetParameter para sus propias
+        # operaciones (usa UpdateInstanceInformation, ListAssociations, etc.),
+        # asi que este Deny no afecta la administeracion por SSM.
+        Sid    = "DenySsmParametersOutsideScope"
+        Effect = "Deny"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParameterHistory",
+        ]
+        NotResource = local.ssm_config_params
+      },
+    ]
+  })
+}
+
+# ==========================================
 # Resource policy del secreto: "quién puede leer ESTE secreto"
 # ==========================================
 #
@@ -81,9 +195,9 @@ resource "aws_secretsmanager_secret_policy" "database" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid       = "AllowInstanceRoleRead"
+      Sid       = "AllowRuntimeRoleRead"
       Effect    = "Allow"
-      Principal = { AWS = aws_iam_role.journal_ssm_role.arn }
+      Principal = { AWS = aws_iam_role.journal_api_runtime_role.arn }
       Action    = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
       Resource  = aws_secretsmanager_secret.database.arn
     }]
@@ -96,82 +210,11 @@ resource "aws_secretsmanager_secret_policy" "llm" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid       = "AllowInstanceRoleRead"
+      Sid       = "AllowRuntimeRoleRead"
       Effect    = "Allow"
-      Principal = { AWS = aws_iam_role.journal_ssm_role.arn }
+      Principal = { AWS = aws_iam_role.journal_api_runtime_role.arn }
       Action    = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
       Resource  = aws_secretsmanager_secret.llm.arn
     }]
-  })
-}
-
-# ==========================================
-# IAM del instance profile: permiso mínimo
-# ==========================================
-#
-# El rol `journal-ssm-role` es la identidad de la instancia (y la que corre
-# deploy-k8s.sh, que lee los secretos y los inyecta en el Secret de k8s).
-# Para Secrets Manager necesita exactamente dos permisos: leer el valor y ver
-# la metadata de esos DOS secretos. Ni listar, ni escribir, ni borrar, ni
-# tocar ningún otro secreto de la cuenta.
-
-resource "aws_iam_role_policy" "instance_secrets" {
-  name = "${var.project}-instance-secrets-policy"
-  role = aws_iam_role.journal_ssm_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ReadOnlyScopedSecrets"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret",
-        ]
-        Resource = [
-          aws_secretsmanager_secret.database.arn,
-          aws_secretsmanager_secret.llm.arn,
-        ]
-      },
-      {
-        # Cinturón y tirantes: si más adelante alguien adjunta al rol una
-        # política amplia (AmazonSecretsManagerFullAccess, o un "*"), este
-        # Deny explícito sigue limitando el acceso a estos dos secretos.
-        # El Deny explícito siempre gana sobre cualquier Allow.
-        Sid    = "DenySecretsManagerOutsideScope"
-        Effect = "Deny"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:PutSecretValue",
-          "secretsmanager:UpdateSecret",
-          "secretsmanager:DeleteSecret",
-          "secretsmanager:ListSecrets",
-        ]
-        NotResource = [
-          local.secret_arn_pattern.database,
-          local.secret_arn_pattern.llm,
-        ]
-      },
-      {
-        # AmazonSSMManagedInstanceCore concede ssm:GetParameters sobre "*".
-        # OPENAI_BASE_URL y OPENAI_MODEL no son secretos (siguen en SSM como
-        # String porque son configuración pública), pero no hay motivo para que
-        # la instancia pueda leer cualquier parámetro de la cuenta.
-        #
-        # Caveat: el SSM Agent no usa GetParameter para sus propias
-        # operaciones (usa UpdateInstanceInformation, ListAssociations, etc.),
-        # así que este Deny no afecta la administeración por SSM.
-        Sid    = "DenySsmParametersOutsideScope"
-        Effect = "Deny"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:GetParameters",
-          "ssm:GetParameterHistory",
-        ]
-        NotResource = local.ssm_config_params
-      },
-    ]
   })
 }

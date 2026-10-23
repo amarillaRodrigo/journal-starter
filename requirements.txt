@@ -9,3 +9,6 @@ opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi
 opentelemetry-exporter-otlp
+# Usado por el init container (scripts/fetch_secrets.py) para descargar los
+# secretos de AWS Secrets Manager con el rol de servicio de la app.
+boto3

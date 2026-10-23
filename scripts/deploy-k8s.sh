@@ -39,35 +39,16 @@ public_ip() {
     "http://169.254.169.254/latest/meta-data/public-ipv4"
 }
 
-# Credenciales: viven en AWS Secrets Manager, cifradas con aws/secretsmanager.
-# Solo el rol de la instancia puede leerlas, y solo GetSecretValue sobre dos
-# ARN exactos (ver terraform/secrets.tf).
+# El deploy NO toca material sensible.
 #
-# Reintenta porque la siembra es out-of-band (scripts/migrate-secrets.sh): en el
-# primer arranque el secreto puede todavia no estar listo.
-secret_field() {
-  local secret_id="$1" key="$2"
-  local attempts="${SECRET_READ_ATTEMPTS:-12}"
-  local value=""
-  for _ in $(seq 1 "${attempts}"); do
-    value="$(aws secretsmanager get-secret-value \
-                --secret-id "${secret_id}" --region "${REGION}" --output json 2>/dev/null \
-              | python3 -c 'import json, sys
-raw = json.load(sys.stdin).get("SecretString", "")
-try:
-    data = json.loads(raw)
-except ValueError:
-    data = {"VALUE": raw}
-sys.stdout.write(str(data.get(sys.argv[1], data.get("VALUE", ""))))' "${key}" 2>/dev/null || true)"
-    if [ -n "${value}" ]; then
-      printf '%s' "${value}"
-      return 0
-    fi
-    sleep 5
-  done
-  echo "ERROR: no se pudo leer '${key}' del secreto '${secret_id}'" >&2
-  return 1
-}
+# Las credenciales viven en AWS Secrets Manager y las baja el init container de
+# cada pod, con el rol de servicio de la app (journal-api-runtime-role), a un
+# emptyDir en memoria. Este script solo publica la configuracion NO sensible
+# (que va en un ConfigMap) y el pull secret de ECR.
+#
+# Consecuencia: ni el Secret de Kubernetes ni el spec del pod contienen una
+# credencial, y el rol de la instancia no tiene permiso de lectura sobre los
+# secretos: no puede leerlos ni siquiera por error.
 
 echo "==> Liberando disco (imagenes sin uso en containerd)"
 # containerd guarda una imagen por commit (el tag es el SHA). Sin esta poda el
@@ -84,25 +65,20 @@ kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml
 kubectl -n "${NAMESPACE}" rollout status deployment/adot-collector --timeout=180s
 kubectl -n "${NAMESPACE}" rollout status daemonset/fluent-bit --timeout=180s
 
-echo "==> Secretos desde AWS Secrets Manager"
-PGPASS="$(secret_field journal-api/credentials/database POSTGRES_PASSWORD)"
-DB_URL="$(secret_field journal-api/credentials/database DATABASE_URL)"
-OPENAI_KEY="$(secret_field journal-api/credentials/llm OPENAI_API_KEY)"
-
 echo "==> Configuracion no sensible desde SSM Parameter Store"
 OPENAI_URL="$(param /journal-api/OPENAI_BASE_URL)"
 OPENAI_MODEL="$(param /journal-api/OPENAI_MODEL)"
 
-kubectl -n "${NAMESPACE}" create secret generic journal-db \
-  --from-literal=POSTGRES_PASSWORD="${PGPASS}" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n "${NAMESPACE}" create secret generic journal-secrets \
-  --from-literal=DATABASE_URL="${DB_URL}" \
-  --from-literal=OPENAI_API_KEY="${OPENAI_KEY}" \
+# ConfigMap, no Secret: estos valores son publicos (URL del proveedor y nombre
+# del modelo) y no tienen por que ir cifrados ni en etcd.
+kubectl -n "${NAMESPACE}" create configmap journal-config \
   --from-literal=OPENAI_BASE_URL="${OPENAI_URL}" \
   --from-literal=OPENAI_MODEL="${OPENAI_MODEL}" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+# Limpieza de los Secrets con credenciales que usaba el esquema anterior: si
+# quedan, el material sigue en etcd aunque nadie los use.
+kubectl -n "${NAMESPACE}" delete secret journal-secrets journal-db --ignore-not-found
 
 echo "==> Pull secret de ECR"
 ECR_TOKEN="$(aws ecr get-login-password --region "${REGION}")"
@@ -118,7 +94,10 @@ ACME_EMAIL="$(param /journal-api/ACME_EMAIL)"
 echo "  IP publica: ${PUBLIC_IP}"
 sed -e "s|__PUBLIC_IP__|${PUBLIC_IP}|g" -e "s|__ACME_EMAIL__|${ACME_EMAIL}|g" \
   k8s/caddy.yaml | kubectl apply -f -
-kubectl apply -f k8s/postgresql.yaml -f k8s/service.yaml
+# El init container de Postgres usa la imagen de la app, asi que tambien hay
+# que sustituirle el tag del commit.
+sed "s|journal-api:placeholder|journal-api:${TAG}|g" k8s/postgresql.yaml | kubectl apply -f -
+kubectl apply -f k8s/service.yaml
 
 echo "==> Esperando Postgres"
 kubectl -n "${NAMESPACE}" rollout status deployment/postgres --timeout=180s

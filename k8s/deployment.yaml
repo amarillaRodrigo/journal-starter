@@ -17,22 +17,40 @@ spec:
       labels:
         app: journal-api
     spec:
+      # El 'sub' del token de esta ServiceAccount es el ExternalId con el que
+      # la app asume su rol de servicio (ver terraform/secrets.tf).
+      serviceAccountName: journal-api
       imagePullSecrets:
         - name: ecr-credential
       initContainers:
-        - name: wait-for-postgres
-          image: postgres:16-alpine
+        # Baja los secretos de AWS Secrets Manager con el rol de servicio de la
+        # app y los deja en un emptyDir en memoria. El material sensible no
+        # entra al Secret de Kubernetes (etcd, base64) ni al spec del pod.
+        - name: fetch-secrets
+          # El tag se sustituye en el deploy (scripts/deploy-k8s.sh) por el commit SHA.
+          image: 607856468834.dkr.ecr.us-east-1.amazonaws.com/journal-api:placeholder
           command:
-            - sh
-            - -c
-            - until pg_isready -h postgres -U postgres; do echo "waiting for postgres"; sleep 2; done
+            - python
+            - /app/scripts/fetch_secrets.py
+            - journal-api/credentials/database
+            - journal-api/credentials/llm
+          env:
+            - name: AWS_RUNTIME_ROLE_ARN
+              value: arn:aws:iam::607856468834:role/journal-api-runtime-role
+            - name: AWS_REGION
+              value: us-east-1
+            - name: SECRETS_DIR
+              value: /secrets
           resources:
             requests:
-              memory: "16Mi"
+              memory: "32Mi"
               cpu: "10m"
             limits:
-              memory: "64Mi"
-              cpu: "100m"
+              memory: "128Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
       containers:
         - name: journal-api
           # El tag se sustituye en el deploy (scripts/deploy-k8s.sh) por el commit SHA.
@@ -42,25 +60,20 @@ spec:
             - containerPort: 8000
               name: http
           env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: journal-secrets
-                  key: DATABASE_URL
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: journal-secrets
-                  key: OPENAI_API_KEY
+            # Las credenciales NO estan aqui: llegan por archivos en /secrets,
+            # que el init container deja en un emptyDir en memoria.
+            - name: SECRETS_DIR
+              value: /secrets
+            # Configuracion no sensible: un ConfigMap, no un Secret.
             - name: OPENAI_BASE_URL
               valueFrom:
-                secretKeyRef:
-                  name: journal-secrets
+                configMapKeyRef:
+                  name: journal-config
                   key: OPENAI_BASE_URL
             - name: OPENAI_MODEL
               valueFrom:
-                secretKeyRef:
-                  name: journal-secrets
+                configMapKeyRef:
+                  name: journal-config
                   key: OPENAI_MODEL
             # Pipeline de observabilidad: app -> OTLP -> ADOT -> X-Ray/CloudWatch.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -88,3 +101,13 @@ spec:
             limits:
               memory: "320Mi"
               cpu: "700m"
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          # medium: Memory => tmpfs. El secreto vive en RAM del pod: ni en el
+          # disco del nodo ni en etcd.
+          emptyDir:
+            medium: Memory
