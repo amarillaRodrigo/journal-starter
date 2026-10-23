@@ -175,6 +175,7 @@ run_on_instance "$K cd /opt/journal-api && git fetch --depth 1 origin main && gi
 |---|---|
 | `InvalidInstanceId` / `InvocationDoesNotExist` | instancia apagada, SSM Agent caído o tag `Name` distinto |
 | `AccessDenied` en `ssm:SendCommand` | política del rol OIDC o recurso de instancia incorrecto |
+| `AccessDenied` en `secretsmanager:GetSecretValue` | el rol de la instancia no tiene el permiso, o la resource policy del secreto no lo nombra (hacen falta **las dos**) |
 | `unknown revision origin/main` | clon shallow sin esa ref; debe usarse `FETCH_HEAD` |
 | timeout de 400 s en el job | 40 reintentos × 10 s; el deploy superó ~6,5 min |
 | `rollout status` timeout | imagen inexistente, pull de ECR fallido, crash de la app o falta de memoria |
@@ -193,14 +194,14 @@ del commit <sha>`.
 ## 4. Deploy verde pero `/version` devuelve otro SHA
 
 **Síntoma:** el run terminó bien, pero
-`curl https://3.216.116.179.sslip.io/version` devuelve un commit anterior o
+`curl https://3.215.52.10.sslip.io/version` devuelve un commit anterior o
 `unknown`.
 
 **Diagnóstico:**
 
 ```bash
 HEAD=$(git rev-parse HEAD)
-curl -fsS https://3.216.116.179.sslip.io/version
+curl -fsS https://3.215.52.10.sslip.io/version
 
 run_on_instance "$K kubectl -n journal-api get deploy/journal-api -o jsonpath='{.spec.template.spec.containers[0].image}'"
 run_on_instance "$K kubectl -n journal-api get pods -o wide"
@@ -288,8 +289,8 @@ run_on_instance "free -m; df -h /; dmesg -T | grep -i -E 'oom|killed process' | 
 **Diagnóstico:**
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://3.216.116.179.sslip.io/entries
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://3.216.116.179.sslip.io/entries \
+curl -sS -o /dev/null -w '%{http_code}\n' https://3.215.52.10.sslip.io/entries
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://3.215.52.10.sslip.io/entries \
   -H 'Content-Type: application/json' -d '{"title":"t","content":"c"}'
 
 run_on_instance "$K kubectl -n journal-api get pods"
@@ -342,11 +343,11 @@ o `curl` devuelve `SSL certificate problem`.
 
 ```bash
 # DNS: sslip.io debe resolver a la Elastic IP
-nslookup 3.216.116.179.sslip.io
+nslookup 3.215.52.10.sslip.io
 
 # Puertos públicos (22 debe estar cerrado; 80/443 abiertos)
-curl -sS -o /dev/null -w 'http=%{http_code}\n' http://3.216.116.179.sslip.io/version
-curl -sSv https://3.216.116.179.sslip.io/version 2>&1 | tail -25
+curl -sS -o /dev/null -w 'http=%{http_code}\n' http://3.215.52.10.sslip.io/version
+curl -sSv https://3.215.52.10.sslip.io/version 2>&1 | tail -25
 
 run_on_instance "$K kubectl -n journal-api get pods -l app=caddy -o wide"
 run_on_instance "$K kubectl -n journal-api logs deploy/caddy --tail=120"
@@ -378,7 +379,7 @@ run_on_instance "sudo ss -lntp | grep -E ':80|:443'"
 **Confirmación:**
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.216.116.179.sslip.io/version
+curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.215.52.10.sslip.io/version
 # 200 0
 ```
 
@@ -579,6 +580,83 @@ pg_isready -U postgres` responde `accepting connections`.
 
 > El lifecycle de ECR limita el registry, **no** el disco de la instancia. La
 > poda de containerd es la que libera espacio local.
+
+---
+
+## 12. Rotar un secreto
+
+**Síntoma:** hay que cambiar la API key de OpenAI o la password de Postgres.
+
+**Diagnóstico:** las credenciales viven en AWS Secrets Manager. Las versiones
+están en el secreto, no en el repo:
+
+```bash
+aws secretsmanager describe-secret --secret-id journal-api/credentials/llm \
+  --region us-east-1 --query '{versions:VersionIdsToStages,deleted:DeletedDate}'
+
+# Y qué versión está sirviendo el Secret de Kubernetes (sin imprimir valores)
+aws ssm send-command --instance-ids "$IID" --document-name AWS-RunShellScript \
+  --parameters 'commands=["kubectl -n journal-api get secret journal-secrets -o jsonpath=\"{.metadata.annotations}\""]'
+```
+
+**Causa habitual:** no es un fallo técnico, es de **orden**. Mover un secreto a
+Secrets Manager **no revoca el valor anterior**: la key vieja sigue siendo
+válida hasta que se revoque en su origen.
+
+**Fix (rotación de la API key de OpenAI):**
+
+```bash
+# 1. Generar una key nueva en el dashboard de OpenAI.
+
+# 2. Escribirla en Secrets Manager SIN que pase por el repo, por un archivo
+#    ni por un canal de chat. El script la lee de stdin.
+printf '%s' "$NUEVA_KEY" | ./scripts/migrate-secrets.sh --set-llm-key
+
+# 3. Redeploy para que el pod tome el valor nuevo.
+gh workflow run ci.yml --ref main
+
+# 4. Verificar que la API responde con la key nueva.
+
+# 5. REVOCAR la key vieja en el dashboard de OpenAI.
+#    Recién ahí la rotación está completa.
+```
+
+**Fix (rotación de la password de Postgres):**
+
+```bash
+# 1. Generar una password nueva.
+
+# 2. Cambiarla en la base de datos. Va PRIMERO, antes de tocar el Secret.
+#    La password no debe llevar comillas simples (rompe el quoting del comando).
+read -rsp "Nueva password: " NEWPW; echo
+run_on_instance "$K kubectl -n journal-api exec deploy/postgres -- psql -U postgres -d career_journal -c \"ALTER USER postgres WITH PASSWORD '$NEWPW'\""
+
+# 3. Actualizar el secreto. POSTGRES_PASSWORD y DATABASE_URL van juntos:
+#    el script vuelve a armar la URL a partir de la password.
+./scripts/migrate-secrets.sh
+
+# 4. Redeploy y verificar.
+gh workflow run ci.yml --ref main
+```
+
+> ⚠️ Si se cambia la password **solo** en el Secret y no en Postgres, la app
+> deja de poder conectarse al arrancar. Y al revés: si se cambia **solo** en
+> Postgres, el Secret queda desincronizado. El orden correcto es a → b → c.
+
+**Caveat sobre borrar los parámetros viejos de SSM:**
+
+```bash
+./scripts/migrate-secrets.sh --cleanup-ssm
+```
+
+Borra `/journal-api/OPENAI_API_KEY` y `/journal-api/POSTGRES_PASSWORD`, pero el
+valor **queda en el historial de versiones de SSM** y se puede recuperar durante
+~30 días. Borrar el parámetro no es revocar: para revocar hay que rotar en el
+origen.
+
+**Confirmación:** el secreto tiene una versión nueva, el pod corre con ella
+(comparando el hash del Secret de k8s con el del secreto) y la credencial
+anterior ya no funciona.
 
 ---
 

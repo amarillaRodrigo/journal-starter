@@ -47,7 +47,7 @@ This is additional reference material for the capstone in case you want to explo
                         |        v  Public Subnet 10.0.1.0/24                  |
                         | +--------------------------------------------------+ |
                         | | EC2 t3.small (Amazon Linux 2023)                 | |
-                        | | Elastic IP 3.216.116.179                         | |
+                        | | Elastic IP 3.215.52.10                         | |
                         | |   k3s (namespace journal-api)                    | |
                         | |     ├── caddy      hostPort 80/443, TLS (sslip)  | |
                         | |     ├── journal-api Deployment :8000             | |

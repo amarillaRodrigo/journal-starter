@@ -3,7 +3,8 @@
 #
 # Uso: ./scripts/deploy-k8s.sh <image-tag>
 #
-# - Lee los secretos desde SSM Parameter Store (nunca desde el repo).
+# - Lee los secretos desde AWS Secrets Manager (nunca desde el repo).
+# - Lee la configuracion no sensible desde SSM Parameter Store.
 # - Crea/actualiza los Secrets de Kubernetes y el pull secret de ECR.
 # - Aplica los manifiestos de k8s/ y espera el rollout de la API.
 set -euo pipefail
@@ -27,6 +28,36 @@ param() {
     --query 'Parameter.Value' --output text
 }
 
+# Credenciales: viven en AWS Secrets Manager, cifradas con aws/secretsmanager.
+# Solo el rol de la instancia puede leerlas, y solo GetSecretValue sobre dos
+# ARN exactos (ver terraform/secrets.tf).
+#
+# Reintenta porque la siembra es out-of-band (scripts/migrate-secrets.sh): en el
+# primer arranque el secreto puede todavia no estar listo.
+secret_field() {
+  local secret_id="$1" key="$2"
+  local attempts="${SECRET_READ_ATTEMPTS:-12}"
+  local value=""
+  for _ in $(seq 1 "${attempts}"); do
+    value="$(aws secretsmanager get-secret-value \
+                --secret-id "${secret_id}" --region "${REGION}" --output json 2>/dev/null \
+              | python3 -c 'import json, sys
+raw = json.load(sys.stdin).get("SecretString", "")
+try:
+    data = json.loads(raw)
+except ValueError:
+    data = {"VALUE": raw}
+sys.stdout.write(str(data.get(sys.argv[1], data.get("VALUE", ""))))' "${key}" 2>/dev/null || true)"
+    if [ -n "${value}" ]; then
+      printf '%s' "${value}"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: no se pudo leer '${key}' del secreto '${secret_id}'" >&2
+  return 1
+}
+
 echo "==> Namespace"
 kubectl apply -f k8s/namespace.yaml
 
@@ -35,9 +66,12 @@ kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml
 kubectl -n "${NAMESPACE}" rollout status deployment/adot-collector --timeout=180s
 kubectl -n "${NAMESPACE}" rollout status daemonset/fluent-bit --timeout=180s
 
-echo "==> Secretos desde SSM Parameter Store"
-PGPASS="$(param /journal-api/POSTGRES_PASSWORD --with-decryption)"
-OPENAI_KEY="$(param /journal-api/OPENAI_API_KEY --with-decryption)"
+echo "==> Secretos desde AWS Secrets Manager"
+PGPASS="$(secret_field journal-api/credentials/database POSTGRES_PASSWORD)"
+DB_URL="$(secret_field journal-api/credentials/database DATABASE_URL)"
+OPENAI_KEY="$(secret_field journal-api/credentials/llm OPENAI_API_KEY)"
+
+echo "==> Configuracion no sensible desde SSM Parameter Store"
 OPENAI_URL="$(param /journal-api/OPENAI_BASE_URL)"
 OPENAI_MODEL="$(param /journal-api/OPENAI_MODEL)"
 
@@ -46,7 +80,7 @@ kubectl -n "${NAMESPACE}" create secret generic journal-db \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "${NAMESPACE}" create secret generic journal-secrets \
-  --from-literal=DATABASE_URL="postgresql://postgres:${PGPASS}@postgres:5432/career_journal" \
+  --from-literal=DATABASE_URL="${DB_URL}" \
   --from-literal=OPENAI_API_KEY="${OPENAI_KEY}" \
   --from-literal=OPENAI_BASE_URL="${OPENAI_URL}" \
   --from-literal=OPENAI_MODEL="${OPENAI_MODEL}" \

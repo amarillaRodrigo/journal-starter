@@ -41,13 +41,13 @@ telemetría en [observability.md](observability.md).
           ▼
   ┌──────────────────────────────────────────────────────────────┐
   │ EC2 t3.small · k3s · namespace journal-api                     │
-  │  namespace → ADOT + Fluent Bit → secrets desde SSM →           │
+  │  namespace → ADOT + Fluent Bit → secretos desde Secrets Manager →           │
   │  Postgres/Service/Caddy → schema → journal-api:<sha>           │
   │  rollout status deployment/journal-api                         │
   └───────┬───────────────────────────────────────────────────────┘
           │ HTTPS 443
           ▼
-  https://3.216.116.179.sslip.io/version → {"commit":"<sha>"}
+  https://3.215.52.10.sslip.io/version → {"commit":"<sha>"}
 ```
 
 ### Detalle por etapa
@@ -96,7 +96,7 @@ environment `production`.
 | Entrada HTTP | `k8s/caddy.yaml` | ConfigMap `caddy-config`, PVC `caddy-data` (TLS), Deployment `caddy` con hostPort 80/443 |
 | Servicio interno de la API | `k8s/service.yaml` | Service ClusterIP `journal-api-service:8000` (consumido por Caddy) |
 | Aplicación | `k8s/deployment.yaml` | Deployment `journal-api` (1 réplica, `strategy: Recreate`), probes en `/version`, límites 320Mi/700m |
-| Secretos | `k8s/secret.example.yaml` (plantilla), `scripts/deploy-k8s.sh` | Secrets `journal-secrets`, `journal-db` y `ecr-credential` creados en el deploy desde SSM Parameter Store; el `secret.yaml` real está gitignored y no se aplica |
+| Secretos | `terraform/secrets.tf`, `scripts/migrate-secrets.sh`, `scripts/deploy-k8s.sh` | credenciales en Secrets Manager (`journal-api/credentials/database` y `.../llm`); Secrets de Kubernetes (`journal-secrets`, `journal-db`) y pull secret de ECR (`ecr-credential`) creados en el deploy; el `secret.yaml` real está gitignored y no se aplica |
 | Pipeline | `.github/workflows/ci.yml` | jobs `test` → `build` → `deploy`, OIDC, push a ECR y SSM Run Command |
 
 > `k8s/deployment-eks.yaml`, `k8s/aspire-dashboard.yaml` y `eks-cluster.yaml` no
@@ -113,7 +113,7 @@ El script es la única fuente de verdad del orden de aplicación. Con
 |---|---|---|
 | 1 | `kubectl apply -f k8s/namespace.yaml` | namespace `journal-api` |
 | 2 | `kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml` + `rollout status` de ambos | ADOT Collector y Fluent Bit listos **antes** de la app (para no perder la primera telemetría) |
-| 3 | lee `/journal-api/{POSTGRES_PASSWORD,OPENAI_API_KEY,OPENAI_BASE_URL,OPENAI_MODEL}` de SSM | valores con `--with-decryption` |
+| 3 | lee `journal-api/credentials/database` y `journal-api/credentials/llm` de Secrets Manager, y los dos parámetros de configuración de SSM | credenciales con `GetSecretValue`; config con `GetParameter` |
 | 4 | crea/actualiza `journal-db`, `journal-secrets` y `ecr-credential` con `--dry-run=client -o yaml \| kubectl apply -f -` | Secrets idempotentes |
 | 5 | `kubectl apply -f k8s/postgresql.yaml -f k8s/service.yaml -f k8s/caddy.yaml` + espera Postgres | PVC, Services y Caddy |
 | 6 | `kubectl exec -i deploy/postgres -- psql ... < database_setup.sql` | esquema idempotente en cada deploy |
@@ -149,14 +149,14 @@ run_on_instance() {
 
 | # | Qué se verifica | Comando exacto | Resultado esperado | Observado (2026-10-22) |
 |---|---|---|---|---|
-| 1 | Terraform aplicado y sin drift | `cd terraform && terraform output` | `api_url`, `public_ip`, `ecr_image`, ARNs de alarmas y topic | `api_url = https://3.216.116.179.sslip.io` |
+| 1 | Terraform aplicado y sin drift | `cd terraform && terraform output` | `api_url`, `public_ip`, `ecr_image`, ARNs de alarmas y topic | `api_url = https://3.215.52.10.sslip.io` |
 | 2 | Imagen del commit en ECR | `aws ecr describe-images --repository-name journal-api --query 'sort_by(imageDetails,&imagePushedAt)[-1].[imageTags,imagePushedAt]' --output json` | el tag contiene el SHA de `HEAD` | `["2cfbc50...","latest"]`, push 17:40 UTC |
 | 3 | Cluster sano | `run_on_instance 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; kubectl -n journal-api get pods -o wide'` | 5 pods `Running` (`journal-api`, `postgres`, `caddy`, `adot-collector`, `fluent-bit`) | 5/5 `Running`, 0 reinicios salvo Caddy (1) |
-| 4 | La API corre ese SHA | `curl -fsS https://3.216.116.179.sslip.io/version` | `{"commit":"<sha de HEAD>"}` | `{"commit":"2cfbc50e7fb2f0f24837ff67b82f9bc2cdc09a97"}` |
+| 4 | La API corre ese SHA | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"<sha de HEAD>"}` | `{"commit":"2cfbc50e7fb2f0f24837ff67b82f9bc2cdc09a97"}` |
 | 5 | La imagen desplegada es la del tag | `run_on_instance 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:<sha de HEAD>` | `...journal-api:2cfbc50e...` |
 | 6 | Alarmas activas | `aws cloudwatch describe-alarms --alarm-name-prefix journal-api --query 'MetricAlarms[].[AlarmName,StateValue]' --output table` | 2 alarmas en `OK` (o `ALARM` si hay incidente real) | `journal-api-http-5xx OK`, `journal-api-latency-p95 OK` |
 | 7 | Notificación SNS operativa | `aws sns list-subscriptions-by-topic --topic-arn "$(terraform -chdir=terraform output -raw sns_alarms_topic_arn)" --query 'Subscriptions[].[Protocol,SubscriptionArn]' --output table` | `email` con ARN real, no `PendingConfirmation` | 1 suscripción confirmada |
-| 8 | HTTPS válido | `curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.216.116.179.sslip.io/version` | `200 0` | `200 0` |
+| 8 | HTTPS válido | `curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.215.52.10.sslip.io/version` | `200 0` | `200 0` |
 
 ## 4. ¿Lo desplegado es el commit actual?
 
@@ -167,13 +167,13 @@ La trazabilidad se apoya en cuatro valores que deben coincidir **exactamente**:
 | Commit local | `git rev-parse HEAD` | `2cfbc50e7fb2f0f24837ff67b82f9bc2cdc09a97` |
 | Tag de la imagen en ECR | `aws ecr describe-images --repository-name journal-api --image-ids imageTag=$(git rev-parse HEAD) --query 'imageDetails[0].imageTags' --output json` | `["2cfbc50e...","latest"]` |
 | Tag que corre Kubernetes | `run_on_instance '... kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:2cfbc50e...` |
-| SHA que responde la app | `curl -fsS https://3.216.116.179.sslip.io/version` | `{"commit":"2cfbc50e..."}` |
+| SHA que responde la app | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"2cfbc50e..."}` |
 
 Comparación en un solo paso:
 
 ```bash
 HEAD=$(git rev-parse HEAD)
-LIVE=$(curl -fsS https://3.216.116.179.sslip.io/version | python -c "import json,sys; print(json.load(sys.stdin)['commit'])")
+LIVE=$(curl -fsS https://3.215.52.10.sslip.io/version | python -c "import json,sys; print(json.load(sys.stdin)['commit'])")
 [ "$HEAD" = "$LIVE" ] && echo "OK: producción corre $HEAD" || echo "DRIFT: HEAD=$HEAD live=$LIVE"
 ```
 

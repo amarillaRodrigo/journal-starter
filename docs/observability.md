@@ -90,7 +90,7 @@ con el segmento `journal-api` y los subsegmentos custom.
 Ejemplo real (`BatchGetTraces`, PATCH de una entrada):
 
 ```text
-SEG journal-api  http://3.216.116.179.sslip.io/entries/a53812e8-...
+SEG journal-api  http://3.215.52.10.sslip.io/entries/a53812e8-...
   SUB PATCH /entries/entry_id       http send
   SUB PATCH /entries/entry_id       http send
   SUB PATCH /entries/entry_id       http receive
@@ -299,7 +299,7 @@ Procedimiento reproducible (sin abrir puertos: todo por SSM):
 kubectl -n journal-api scale deploy/postgres --replicas=0
 
 # 2. Generar tráfico (cada request falla con 500)
-for i in $(seq 1 20); do curl -s -o /dev/null https://3.216.116.179.sslip.io/entries; sleep 5; done
+for i in $(seq 1 20); do curl -s -o /dev/null https://3.215.52.10.sslip.io/entries; sleep 5; done
 
 # 3. Observar la métrica y el estado
 aws cloudwatch get-metric-statistics --namespace JournalAPI \

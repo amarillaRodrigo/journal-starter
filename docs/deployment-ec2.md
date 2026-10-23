@@ -16,7 +16,7 @@ deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
    └── deploy  (aws ssm send-command → rollout status)
                         │
                         ▼
-        EC2 t3.small (Amazon Linux 2023) — Elastic IP 3.216.116.179
+        EC2 t3.small (Amazon Linux 2023) — Elastic IP 3.215.52.10
           └── k3s (namespace journal-api)
                 ├── caddy            hostPort 80/443, TLS automático (Let's Encrypt)
                 ├── journal-api      Deployment (1 réplica), :8000
@@ -25,7 +25,7 @@ deploy se ejecuta sin abrir puertos de administración, vía **AWS SSM**.
                 └── fluent-bit       DaemonSet → CloudWatch Logs
 ```
 
-**URL pública:** https://3.216.116.179.sslip.io
+**URL pública:** https://3.215.52.10.sslip.io
 
 **Puertos abiertos:** 80 y 443. El 22 está **cerrado**; la administración es por
 **SSM Run Command / Session Manager**.
@@ -50,26 +50,74 @@ El rol solo confía en:
 y solo permite: push a ECR, `ec2:DescribeInstances` y `ssm:SendCommand` /
 `GetCommandInvocation`.
 
-El último paso de `deploy` consulta `https://3.216.116.179.sslip.io/version` y
+El último paso de `deploy` consulta `https://3.215.52.10.sslip.io/version` y
 falla si el `commit` devuelto no es el SHA del push.
 
 ## Secretos
 
-Nada sensible vive en el repo ni en la imagen (`.env`, `k8s/secret.yaml` y
-`terraform/` están en `.gitignore` y `.dockerignore`).
+Nada sensible vive en el repo ni en la imagen: `.env` y `k8s/secret.yaml` están
+en `.gitignore` y `.dockerignore`, y `terraform.tfstate` / `terraform.tfvars`
+también están fuera de git.
 
-Los valores reales están en **SSM Parameter Store**:
+Las **credenciales** viven en **AWS Secrets Manager**:
 
-| Parámetro | Tipo |
+| Secreto | Claves |
 |---|---|
-| `/journal-api/OPENAI_API_KEY` | SecureString |
-| `/journal-api/POSTGRES_PASSWORD` | SecureString |
-| `/journal-api/OPENAI_BASE_URL` | String |
-| `/journal-api/OPENAI_MODEL` | String |
+| `journal-api/credentials/database` | `POSTGRES_PASSWORD`, `DATABASE_URL` |
+| `journal-api/credentials/llm` | `OPENAI_API_KEY` |
 
-`scripts/deploy-k8s.sh` los lee con `--with-decryption` y crea los Secrets de
-Kubernetes (`journal-secrets`, `journal-db`) y el pull secret de ECR
-(`ecr-credential`) en cada deploy.
+La **configuración no sensible** sigue en **SSM Parameter Store** como `String`
+plano: son valores públicos (la URL del proveedor y el nombre del modelo), no
+credenciales, y no tienen por qué pagar el coste de un secreto:
+
+| Parámetro | Tipo | ¿Secreto? |
+|---|---|---|
+| `/journal-api/OPENAI_BASE_URL` | String | no |
+| `/journal-api/OPENAI_MODEL` | String | no |
+
+### El valor del secreto no pasa por Terraform
+
+`terraform/secrets.tf` crea **solo el "cascarón"** del secreto (nombre, ARN,
+tags, resource policy, cifrado). El **valor** se siembra una sola vez, fuera de
+banda:
+
+```bash
+./scripts/migrate-secrets.sh            # SSM Parameter Store -> Secrets Manager
+./scripts/migrate-secrets.sh --dry-run  # muestra el plan sin escribir
+```
+
+Si el valor estuviera en una `aws_secretsmanager_secret_version` o en
+`terraform.tfvars`, quedaría en **texto plano dentro de `terraform.tfstate`**,
+que es un archivo en disco. Mover un secreto de "archivo" a Secrets Manager
+mientras se lo deja en el estado no cambia nada.
+
+### Quién puede leerlos
+
+El rol `journal-ssm-role` (instance profile de la EC2) tiene:
+
+- **Allow** de `secretsmanager:GetSecretValue` y `DescribeSecret` **solo** sobre
+  los dos ARN exactos.
+- **Deny** explícito para cualquier otro secreto y para `ListSecrets`.
+- **Deny** explícito para `ssm:GetParameter*` fuera de los dos parámetros de
+  configuración.
+
+El Deny explícito siempre gana sobre cualquier Allow: aunque mañana se
+adjuntara una política amplia al rol, el acceso seguiría acotado a esos dos
+secretos.
+
+Además, cada secreto tiene una **resource policy** que nombra al rol. **Las dos
+políticas deben permitir la acción**: AWS evalúa la intersección de la identity
+policy y la resource policy.
+
+`scripts/deploy-k8s.sh` lee los dos secretos en el nodo (con las credenciales
+del instance profile) y crea los Secrets de Kubernetes (`journal-secrets`,
+`journal-db`) y el pull secret de ECR (`ecr-credential`) en cada deploy.
+
+### Rotación
+
+Mover un secreto a Secrets Manager **no revoca** el valor anterior: hay que
+rotarlo en su origen. Ver [runbook.md](runbook.md#12-rotar-un-secreto) para el
+procedimiento completo.
 
 ## Deploy manual / troubleshooting
 
@@ -152,9 +200,9 @@ aws logs tail /aws/journal-api/application --follow --region us-east-1
 ## Verificación
 
 ```powershell
-Invoke-RestMethod https://3.216.116.179.sslip.io/version   # {"commit":"<sha>"}
-Invoke-RestMethod https://3.216.116.179.sslip.io/entries
-Invoke-RestMethod https://3.216.116.179.sslip.io/openapi.json
+Invoke-RestMethod https://3.215.52.10.sslip.io/version   # {"commit":"<sha>"}
+Invoke-RestMethod https://3.215.52.10.sslip.io/entries
+Invoke-RestMethod https://3.215.52.10.sslip.io/openapi.json
 ```
 
 Comprobar que la imagen no lleva secretos:

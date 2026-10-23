@@ -18,7 +18,9 @@ env:
   AWS_REGION: us-east-1
   ECR_REGISTRY: 607856468834.dkr.ecr.us-east-1.amazonaws.com
   ECR_REPOSITORY: journal-api
-  PUBLIC_URL: https://3.216.116.179.sslip.io
+# La URL publica NO se hardcodea: la IP la asigna Terraform (aws_eip) y cambia
+# en cada destroy/apply. El job deploy la resuelve desde la instancia y la
+# exporta como output.
 
 jobs:
   test:
@@ -124,7 +126,9 @@ jobs:
 
     environment:
       name: production
-      url: https://3.216.116.179.sslip.io
+      # Link cosmetico del deployment. La verificacion funcional NO usa esta
+      # variable: el job resuelve la IP real desde la instancia.
+      url: ${{ vars.PUBLIC_URL }}
 
     permissions:
       contents: read
@@ -137,6 +141,20 @@ jobs:
           role-to-assume: arn:aws:iam::607856468834:role/journal-github-actions
           role-session-name: gha-deploy-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve the public URL from the instance
+        id: publicurl
+        run: |
+          set -euo pipefail
+          # La IP publica la asigna Terraform (aws_eip) y cambia en cada
+          # destroy/apply, asi que no se hardcodea. Se resuelve desde la
+          # instancia, que se busca por tag igual que en el paso de deploy.
+          IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=journal-api-instance" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "IP publica: ${IP}"
+          echo "url=https://${IP}.sslip.io" >> "$GITHUB_OUTPUT"
 
       - name: Deploy image to Kubernetes via SSM
         run: |
@@ -182,8 +200,11 @@ jobs:
           test "$STATUS" = "Success"
 
       - name: Verify the public endpoint runs the new commit
+        env:
+          PUBLIC_URL: ${{ steps.publicurl.outputs.url }}
         run: |
           set -euo pipefail
+          echo "Verificando ${PUBLIC_URL}"
           for i in $(seq 1 20); do
             COMMIT=$(curl -fsS "${PUBLIC_URL}/version" | python3 -c "import json,sys; print(json.load(sys.stdin)['commit'])" 2>/dev/null || true)
             echo "[$i] /version -> ${COMMIT:-<sin respuesta>}"

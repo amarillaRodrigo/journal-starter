@@ -318,7 +318,7 @@ resource "aws_instance" "journal_api" {
   }
 
   # Bootstrap completo: swap, k3s, clonado del repo y primer deploy.
-  # Los secretos se leen de SSM Parameter Store en el deploy, nunca se hornean.
+  # Los secretos se leen de AWS Secrets Manager en el deploy, nunca se hornean.
   user_data = <<-EOF
     #!/bin/bash
     set -euxo pipefail
@@ -344,6 +344,8 @@ resource "aws_instance" "journal_api" {
 
     # --- Código (repo público) y primer deploy ---
     dnf install -y git
+    # deploy-k8s.sh parsea el SecretString con python3 (solo stdlib).
+    command -v python3 >/dev/null 2>&1 || dnf install -y python3
     if [ ! -d /opt/journal-api/.git ]; then
       git clone --depth 1 --branch main ${local.repo_url} /opt/journal-api
     fi
@@ -356,7 +358,14 @@ resource "aws_instance" "journal_api" {
   depends_on = [
     aws_iam_role_policy_attachment.ssm_core,
     aws_iam_role_policy_attachment.ecr_read,
+    aws_iam_role_policy.observability,
     aws_ecr_repository.journal_api,
+    # El user_data corre deploy-k8s.sh en el primer arranque: el secreto y el
+    # permiso GetSecretValue tienen que existir ANTES de que la instancia
+    # arranque, o el bootstrap falla.
+    aws_secretsmanager_secret.database,
+    aws_secretsmanager_secret.llm,
+    aws_iam_role_policy.instance_secrets,
   ]
 
   tags = {
