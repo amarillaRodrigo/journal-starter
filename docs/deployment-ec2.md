@@ -147,9 +147,16 @@ terraform apply
 ```
 
 Crea: VPC/subnet/IGW/route table, Security Group (80/443), IAM de instancia
-(SSM + ECR read + X-Ray/CloudWatch), OIDC provider de GitHub + rol
-`journal-github-actions`, repositorio ECR + lifecycle policy, EC2 con
-`user_data` que instala k3s y despliega, y Elastic IP.
+(SSM + ECR read + X-Ray/CloudWatch + Secrets Manager acotado), OIDC provider de
+GitHub + rol `journal-github-actions`, repositorio ECR + lifecycle policy, EC2
+con `user_data` que instala k3s y despliega, Elastic IP, y los secretos en
+Secrets Manager (`terraform/secrets.tf`).
+
+La instancia usa un **volumen raíz de 20 GB en gp3** (`root_block_device`). El
+default del `t3.small` son 8 GB y no alcanzan: containerd conserva una imagen
+por commit (el tag es el SHA) y al 15 % de espacio libre el kubelet entra en
+`DiskPressure` y evicta pods en masa. Ver
+[runbook.md](runbook.md#11-disco-lleno).
 
 `terraform output` devuelve `api_url`, `public_ip`, `ecr_image`,
 `github_actions_role_arn`, `cloudwatch_dashboard_url`, los ARNs de las alarmas

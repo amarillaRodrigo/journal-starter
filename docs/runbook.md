@@ -540,6 +540,13 @@ email llega a la casilla suscripta (1 confirmed / 0 pending).
 **Síntoma:** pods en `Evicted`, `ImagePullBackOff`, Postgres no puede escribir,
 `no space left on device`, o el disco raíz supera ~85 %.
 
+> **Síntoma específico de `DiskPressure`:** el kubelet **evicta pods en masa**
+> (`The node had condition: [DiskPressure]`), el ReplicaSet no converge,
+> `rollout status` termina con `error: timed out waiting for the condition`
+> y el endpoint queda en **502** aunque el deploy haya "aplicado" bien. Es el
+> fallo más confundente del pipeline: parece un problema de imagen o de app,
+> pero el nodo se quedó sin disco.
+
 **Diagnóstico:**
 
 ```bash
@@ -552,8 +559,13 @@ run_on_instance "sudo k3s crictl info | head -40"
 
 **Causa probable:**
 
-- Imágenes viejas en containerd: cada deploy baja una imagen nueva y el nodo de
-  8 GB acumula capas.
+- Imágenes viejas en containerd: cada deploy baja una imagen nueva y el nodo
+  acumula capas. **Esto ya se poda solo**: `scripts/deploy-k8s.sh` corre
+  `k3s crictl rmi --prune` antes de aplicar.
+- **Volumen raíz insuficiente:** el umbral de eviction de kubelet es
+  `imagefs.available < 15 %`. Con el volumen raíz de **20 GB** (gp3) y la poda
+  automática, el nodo queda holgado; si vuelve a aparecer `DiskPressure`, es
+  que el disco se llenó por otra causa (logs, snapshots, PVCs).
 - Logs del sistema/`journald` sin rotación.
 - PVCs (`postgres-data` 1Gi, `caddy-data` 256Mi) y snapshots locales de k3s.
 - Restos de la verificación con Aspire Dashboard (Deployment eliminado, imagen
