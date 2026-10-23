@@ -172,12 +172,16 @@ fi
 
 echo ""
 echo "==> 10. La app responde con la configuracion inyectada"
-code="$(curl -sS -o /dev/null -w '%{http_code}' \
-        "http://journal-api-service.${NAMESPACE}.svc.cluster.local:8000/version" 2>/dev/null || echo 000)"
-if [ "${code}" = "200" ]; then
-  pass "GET /version dentro del cluster -> 200"
+# El readiness probe de la app ES un GET /version: que el pod este Ready
+# significa que /version respondio 200 con la configuracion inyectada.
+# (No se usa curl contra el Service ClusterIP porque el nodo no resuelve el
+# DNS interno del cluster: ese chequeo vive en el job de deploy, desde fuera.)
+ready="$(kubectl -n "${NAMESPACE}" get pod -l app=journal-api \
+        -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)"
+if [ "${ready}" = "true" ]; then
+  pass "el pod de la app esta Ready (su readiness probe es GET /version -> 200)"
 else
-  fail "GET /version dentro del cluster -> ${code}"
+  fail "el pod de la app no esta Ready (readiness=${ready})"
 fi
 
 # --- 11. los pods siguen sanos ------------------------------------------------
