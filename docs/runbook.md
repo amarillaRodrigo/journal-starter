@@ -308,7 +308,8 @@ En CloudWatch Logs, la query guardada `journal-api/errores-5xx` muestra el
 - **Postgres caído o sin readiness:** `DATABASE_URL` apunta a `postgres:5432`;
   si el Deployment no está listo, la app devuelve 500 en cada request.
 - **Credenciales desincronizadas:** `journal-secrets`/`journal-db` no coinciden
-  con `/journal-api/POSTGRES_PASSWORD` (p. ej. alguien rotó SSM sin redeploy).
+  con el secreto `journal-api/credentials/database` de Secrets Manager (p. ej.
+  alguien rotó el secreto sin redeploy).
 - **Esquema ausente:** la tabla `entries` no existe porque el paso
   `database_setup.sql` falló y `set -e` cortó el deploy (en ese caso el deploy
   no debería estar verde).
