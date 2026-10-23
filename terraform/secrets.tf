@@ -34,10 +34,11 @@ locals {
   }
 
   # Parámetros de SSM que NO son secretos (String plano) y siguen siendo la
-  # fuente de la configuración del proveedor LLM.
+  # fuente de la configuración del proveedor LLM y del contacto ACME.
   ssm_config_params = [
     "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/journal-api/OPENAI_BASE_URL",
     "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/journal-api/OPENAI_MODEL",
+    "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/journal-api/ACME_EMAIL",
   ]
 }
 

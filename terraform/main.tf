@@ -32,12 +32,23 @@ variable "github_repository" {
   default     = "amarillaRodrigo/journal-starter"
 }
 
+variable "acme_email" {
+  description = "Email de contacto para el registro ACME (Caddy / Let's Encrypt). Si se deja vacío se usa alarm_email."
+  type        = string
+  default     = ""
+}
+
 locals {
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
   image        = "${local.ecr_registry}/${var.project}:${var.image_tag}"
   repo_url     = "https://github.com/${var.github_repository}.git"
   gh_owner     = split("/", var.github_repository)[0]
   gh_repo      = split("/", var.github_repository)[1]
+
+  # Email de contacto para el registro ACME de Caddy. Reutiliza el de las
+  # alarmas si no se define uno propio, para no duplicar el dato en
+  # terraform.tfvars (que está gitignored).
+  acme_email = var.acme_email != "" ? var.acme_email : var.alarm_email
 }
 
 # ==========================================
@@ -384,6 +395,22 @@ resource "aws_eip" "journal_eip" {
   tags = {
     Name = "${var.project}-eip"
   }
+}
+
+# ==========================================
+# Configuración no sensible en SSM Parameter Store
+# ==========================================
+#
+# Valores que el deploy necesita y que NO son credenciales: son públicos, así
+# que van como String plano y no tienen por qué pagar el coste de un secreto
+# en Secrets Manager. El rol de la instancia solo puede leer estos (ver
+# terraform/secrets.tf).
+
+resource "aws_ssm_parameter" "acme_email" {
+  name        = "/journal-api/ACME_EMAIL"
+  type        = "String"
+  value       = local.acme_email
+  description = "Email de contacto para el registro ACME (Let's Encrypt / ZeroSSL) de Caddy."
 }
 
 # ==========================================

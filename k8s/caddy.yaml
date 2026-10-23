@@ -7,12 +7,16 @@ data:
   Caddyfile: |
     {
         admin off
-        email admin@example.com
+        email __ACME_EMAIL__
     }
 
     # sslip.io resuelve este nombre al Elastic IP de la instancia.
     # Caddy emite y renueva el certificado TLS automáticamente (Let's Encrypt).
-    3.216.116.179.sslip.io {
+    #
+    # __PUBLIC_IP__ y __ACME_EMAIL__ los sustituye scripts/deploy-k8s.sh en
+    # cada deploy: la IP la asigna Terraform (aws_eip) y cambia en cada
+    # destroy/apply, y el email de ACME no se quiere en el repo.
+    __PUBLIC_IP__.sslip.io {
         encode zstd gzip
         reverse_proxy journal-api-service:8000
     }
@@ -71,7 +75,7 @@ spec:
               port: http
               httpHeaders:
                 - name: Host
-                  value: 3.216.116.179.sslip.io
+                  value: __PUBLIC_IP__.sslip.io
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:

@@ -28,6 +28,17 @@ param() {
     --query 'Parameter.Value' --output text
 }
 
+# IP pública de la instancia (IMDSv2). El hostname que sirve Caddy y el
+# certificado TLS dependen de ella, y Terraform la reasigna en cada
+# destroy/apply: por eso se resuelve en runtime en vez de estar hardcodeada.
+public_ip() {
+  local token
+  token="$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+             -H "X-aws-ec2-metadata-token-ttl-seconds: 60")"
+  curl -s -H "X-aws-ec2-metadata-token: ${token}" \
+    "http://169.254.169.254/latest/meta-data/public-ipv4"
+}
+
 # Credenciales: viven en AWS Secrets Manager, cifradas con aws/secretsmanager.
 # Solo el rol de la instancia puede leerlas, y solo GetSecretValue sobre dos
 # ARN exactos (ver terraform/secrets.tf).
@@ -95,7 +106,12 @@ kubectl -n "${NAMESPACE}" create secret generic ecr-credential \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo "==> Postgres, Service y Caddy"
-kubectl apply -f k8s/postgresql.yaml -f k8s/service.yaml -f k8s/caddy.yaml
+PUBLIC_IP="$(public_ip)"
+ACME_EMAIL="$(param /journal-api/ACME_EMAIL)"
+echo "  IP publica: ${PUBLIC_IP}"
+sed -e "s|__PUBLIC_IP__|${PUBLIC_IP}|g" -e "s|__ACME_EMAIL__|${ACME_EMAIL}|g" \
+  k8s/caddy.yaml | kubectl apply -f -
+kubectl apply -f k8s/postgresql.yaml -f k8s/service.yaml
 
 echo "==> Esperando Postgres"
 kubectl -n "${NAMESPACE}" rollout status deployment/postgres --timeout=180s
