@@ -100,27 +100,42 @@ Si el valor estuviera en una `aws_secretsmanager_secret_version` o en
 que es un archivo en disco. Mover un secreto de "archivo" a Secrets Manager
 mientras se lo deja en el estado no cambia nada.
 
-### Quién puede leerlos
+### Dos identidades de servicio
 
-El rol `journal-ssm-role` (instance profile de la EC2) tiene:
+| Identidad | Qué puede hacer |
+|---|---|
+| `journal-api-runtime-role` (la app) | **solo** `GetSecretValue` y `DescribeSecret` sobre los dos ARN exactos de los secretos del proyecto |
+| `journal-ssm-role` (instance profile de la EC2) | **no puede leer secretos**: tiene un Deny explícito. Solo puede **delegar** en el rol de la app, y solo con el `ExternalId` correcto |
 
-- **Allow** de `secretsmanager:GetSecretValue` y `DescribeSecret` **solo** sobre
-  los dos ARN exactos.
-- **Deny** explícito para cualquier otro secreto y para `ListSecrets`.
-- **Deny** explícito para `ssm:GetParameter*` fuera de los dos parámetros de
-  configuración.
-
-El Deny explícito siempre gana sobre cualquier Allow: aunque mañana se
-adjuntara una política amplia al rol, el acceso seguiría acotado a esos dos
-secretos.
-
-Además, cada secreto tiene una **resource policy** que nombra al rol. **Las dos
+El `ExternalId` del `AssumeRole` es el `sub` del token de ServiceAccount del
+pod (`system:serviceaccount:journal-api:journal-api`), que se lee de
+`/var/run/secrets/kubernetes.io/serviceaccount/token`. Además, cada secreto
+tiene una **resource policy** que nombra al **rol de la app**. **Las dos
 políticas deben permitir la acción**: AWS evalúa la intersección de la identity
 policy y la resource policy.
 
-`scripts/deploy-k8s.sh` lee los dos secretos en el nodo (con las credenciales
-del instance profile) y crea los Secrets de Kubernetes (`journal-secrets`,
-`journal-db`) y el pull secret de ECR (`ecr-credential`) en cada deploy.
+### Cómo llega el secreto al proceso
+
+```text
+Secrets Manager
+   │  GetSecretValue con el rol de la app (credenciales temporales de STS)
+   ▼
+init container del pod ──► emptyDir (medium: Memory → tmpfs)
+   │                           /secrets/DATABASE_URL
+   │                           /secrets/OPENAI_API_KEY
+   ▼
+app: pydantic-settings los lee del directorio (secrets_dir)
+```
+
+El material sensible **no entra** al Secret de Kubernetes (etcd, base64) ni al
+spec del pod (legible por cualquiera con `get pods`). Postgres toma la
+password de un archivo (`POSTGRES_PASSWORD_FILE`). El deploy solo publica la
+configuración no sensible, en un **ConfigMap** (`journal-config`).
+
+> **Limitación conocida:** en k3s cualquier pod alcanza IMDS (hop limit 2) y
+> puede obtener las credenciales del instance profile, así que el `ExternalId`
+> protege del uso accidental, no de un atacante. El aislamiento real por pod
+> exige IRSA o EKS Pod Identity, que necesitan un issuer OIDC público.
 
 ### Rotación
 

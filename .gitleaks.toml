@@ -6,18 +6,17 @@ useDefault = true
 
 [[allowlists]]
 description = """
-Clave de instrumentacion de Azure Application Insights, comiteada en febrero
-de 2025 en .vscode/launch.json y en README.md de este repositorio publico.
+Clave de instrumentacion de Azure Application Insights, comiteada el 2025-02-05
+en .vscode/launch.json y el 2025-02-25 en README.md.
+
+NO es una credencial de este fork: viene del historial del repositorio de
+origen, anterior al primer commit del fork (2026-10-09). El owner de origen
+deberia rotarla; desde aca no se puede (no hay acceso a ese recurso de Azure).
 
 La allowlist combina `commits` y `paths`: perdona un hallazgo solo si esta en
-uno de esos dos commits Y en uno de esos dos archivos. Cualquier otro secreto
-que estuviera en esos mismos commits, o en esos archivos en otro commit, sigue
-siendo detectado.
-
-La remediacion real es la ROTACION de la clave en Azure (el allowlist solo
-mantiene verde el pipeline; un allowlist no invalida una credencial). El arbol
-actual esta limpio: ni .vscode/launch.json ni README.md contienen la
-connection string.
+uno de esos dos commits AND en uno de esos dos archivos. Cualquier otro
+secreto en esos commits, o en esos archivos en otro commit, sigue detectandose
+(comprobado: una key plantada en otro archivo si se reporta).
 
 El historial no se reescribe porque los SHA de esos commits son evidencia del
 capstone (ver docs/delivery.md, seccion 6).

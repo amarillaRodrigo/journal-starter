@@ -696,6 +696,57 @@ anterior ya no funciona.
 
 ---
 
+## 13. El escaneo de secretos falla el pipeline
+
+**Síntoma:** el job `test` falla en el paso *Scan the history for committed
+secrets (gitleaks)* y nunca llega a `build`.
+
+**Diagnóstico:** el paso imprime el hallazgo con `--redact`: muestra el
+archivo, la línea, la regla y el fingerprint, pero **no** el valor. Para ver
+más, en local con el mismo gitleaks que usa el CI:
+
+```bash
+GL_VERSION="8.30.1"
+curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
+  | tar -xz gitleaks
+./gitleaks detect --source . --no-banner --verbose
+```
+
+**Causa habitual:** un secreto commiteado. En un repo que es un **fork**, el
+historial incluye los commits del repositorio de origen y puede traer
+credenciales que **no son tuyas**.
+
+**Triage (este repo):** el allowlist de `.gitleaks.toml` perdona exactamente
+dos hallazgos, ambos del historial de origen:
+
+| Fingerprint | Qué es |
+|---|---|
+| `b3aa0d4e:.vscode/launch.json:generic-api-key:19` | connection string de Azure App Insights (2025-02-05) |
+| `f95f5904:README.md:generic-api-key:209` | la misma credencial (2025-02-25) |
+
+Son commits de los autores del repo de origen, anteriores al primer commit
+del fork (2026-10-09). **Desde acá no hay acceso a ese recurso de Azure**, así
+que la remediación es que el owner de origen lo rote; el allowlist existe para
+que el fork no bloquee su propio pipeline ni normalice el hallazgo.
+
+**Fix según de quién sea el secreto:**
+
+- **Es tuyo:** rotarlo en el proveedor, actualizar el secreto en AWS
+  ([sección 12](#12-rotar-un-secreto)) y redeployear.
+- **Es de un tercero (fork):** reportarlo al owner del repo de origen y
+  agregar el hallazgo a `.gitleaks.toml` con `commits` + `paths` — **nunca solo
+  por commit**, así no se perdonan otros secretos del mismo commit.
+- **Es un falso positivo:** una regla `[[rules.allowlists]]` con `regexes`.
+
+**Por qué se escanea el historial y no solo el árbol:** un secreto commiteado
+y borrado después sigue en el historial, y `git clone` lo descarga entero.
+Por eso el checkout del CI usa `fetch-depth: 0`.
+
+**Confirmación:** `./gitleaks detect --source . --redact --no-banner` termina
+con `no leaks found` y el job `test` sigue en verde.
+
+---
+
 ## Referencias
 
 - [delivery.md](delivery.md): cadena de entrega y verificación commit ↔ imagen ↔ `/version`.

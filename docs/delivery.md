@@ -57,7 +57,7 @@ telemetría en [observability.md](observability.md).
 
 | # | Etapa | Disparador | Comando / archivo | Resultado verificable |
 |---|---|---|---|---|
-| 1 | `test` | push o PR a `main` | `uv run ruff check .` + `uv run pytest -m "not exercise"` con Postgres 16 como service container | el job falla antes de construir si el código o los tests están rotos |
+| 1 | `test` | push o PR a `main` | `gitleaks detect` sobre el **historial completo** (`fetch-depth: 0`) + `uv run ruff check .` + `uv run pytest -m "not exercise"` con Postgres 16 como service container | el job falla antes de construir si hay un secreto commiteado, o si el código o los tests están rotos |
 | 2 | `build` | push a `main` (o `workflow_dispatch`), `needs: test` | `docker/build-push-action` con `build-args: GIT_SHA=${{ github.sha }}` | imagen en ECR con tag `<sha>` y `latest` |
 | 3 | `deploy` | `needs: build`, `environment: production` | `aws ec2 describe-instances` (URL pública) + `aws ssm send-command` → `git fetch --depth 1 origin main` → `git reset --hard FETCH_HEAD` → `bash scripts/deploy-k8s.sh <sha>` | SSM `Success` + rollout completo |
 | 4 | verificación | último paso de `deploy` | `curl -fsS $PUBLIC_URL/version` en un loop de 20 intentos | `commit` == `github.sha`; si no, el job falla |
@@ -98,8 +98,12 @@ environment `production`.
 | Imagen de la API | `Dockerfile`, `.dockerignore` | repositorio ECR `journal-api`; tag = commit SHA (y `latest`); lifecycle: conserva 15 imágenes |
 | Infraestructura base | `terraform/main.tf` | VPC `10.0.0.0/16`, subnet pública, IGW, route table, Security Group 80/443 (sin 22), IAM de instancia (`journal-ssm-role` + `journal-ssm-profile`), OIDC provider de GitHub + rol `journal-github-actions`, repositorio ECR, instancia `t3.small` con `user_data` (swap + k3s + primer deploy), Elastic IP, **volumen raíz 20 GB gp3 cifrado** |
 | Observabilidad como código | `terraform/monitoring.tf` | topic SNS `journal-api-alarms`, suscripción email (valor en `terraform.tfvars`, gitignored), log groups `/aws/journal-api/application` y `/aws/journal-api/metrics`, política IAM de X-Ray/CloudWatch Logs/PutMetricData, dashboard `journal-api`, alarmas `journal-api-http-5xx` y `journal-api-latency-p95`, 2 query definitions |
-| Secretos (cascarón) | `terraform/secrets.tf` | secretos `journal-api/credentials/database` y `journal-api/credentials/llm` + sus resource policies; IAM con `GetSecretValue` acotado a esos dos ARN |
+| Secretos (cascarón) | `terraform/secrets.tf` | secretos `journal-api/credentials/database` y `journal-api/credentials/llm` + sus resource policies |
+| Identidad de la app | `terraform/secrets.tf` | rol `journal-api-runtime-role`: solo `GetSecretValue`/`DescribeSecret` sobre esos dos ARN. El instance profile tiene un **Deny** de lectura y solo puede delegar en ese rol, con el `ExternalId` del ServiceAccount del pod |
 | Configuración no sensible | `terraform/main.tf` | parámetros SSM `/journal-api/OPENAI_BASE_URL`, `/journal-api/OPENAI_MODEL`, `/journal-api/ACME_EMAIL` (tipo `String`) |
+| Secretos (siembra) | `scripts/migrate-secrets.sh` | mueve el valor de SSM Parameter Store a Secrets Manager **fuera de banda**; también rota (`--set-llm-key`) y limpia los parámetros viejos (`--cleanup-ssm`) |
+| Secretos (descarga) | `scripts/fetch_secrets.py` | init container que asume el rol de la app y deja cada valor en `/secrets` (emptyDir con `medium: Memory`): el material nunca entra a etcd ni al spec del pod |
+| Secretos (consumo) | `api/config.py`, `k8s/deployment.yaml` | la app lee los archivos vía `secrets_dir` de pydantic-settings; Postgres usa `POSTGRES_PASSWORD_FILE`. No hay ningún Secret de credenciales en el namespace |
 | Namespace | `k8s/namespace.yaml` | namespace `journal-api` |
 | Telemetría | `k8s/adot-collector.yaml` | ConfigMap `adot-collector-config`, Deployment `adot-collector`, Service ClusterIP `adot-collector:4318` |
 | Logs | `k8s/fluent-bit.yaml` | ServiceAccount + ClusterRole/Binding, ConfigMap `fluent-bit-config`, DaemonSet `fluent-bit` |
@@ -108,7 +112,7 @@ environment `production`.
 | Servicio interno de la API | `k8s/service.yaml` | Service ClusterIP `journal-api-service:8000` (consumido por Caddy) |
 | Aplicación | `k8s/deployment.yaml` | Deployment `journal-api` (1 réplica, `strategy: Recreate`), probes en `/version`, límites 320Mi/700m |
 | Secretos (siembra) | `scripts/migrate-secrets.sh` | mueve el valor de SSM Parameter Store a Secrets Manager **fuera de banda**; también rota (`--set-llm-key`) y limpia los parámetros viejos (`--cleanup-ssm`) |
-| Secretos (consumo) | `scripts/deploy-k8s.sh` | Secrets de Kubernetes (`journal-secrets`, `journal-db`) y pull secret de ECR (`ecr-credential`) creados en el deploy desde Secrets Manager; el `secret.yaml` real está gitignored y no se aplica |
+| Secretos (consumo) | `scripts/deploy-k8s.sh` | el deploy publica solo el ConfigMap `journal-config` (configuración no sensible) y el pull secret de ECR; y borra los Secrets `journal-secrets`/`journal-db` del esquema anterior. **No toca material sensible** |
 | Pipeline | `.github/workflows/ci.yml` | jobs `test` → `build` → `deploy`, OIDC, push a ECR y SSM Run Command |
 
 > `k8s/deployment-eks.yaml`, `k8s/aspire-dashboard.yaml` y `eks-cluster.yaml` no
@@ -126,8 +130,8 @@ El script es la única fuente de verdad del orden de aplicación. Con
 | 0 | `sudo k3s crictl rmi --prune` + `df -h /` | poda de imágenes sin uso: containerd guarda una imagen por commit (el tag es el SHA) y sin esto el nodo llega a `DiskPressure` |
 | 1 | `kubectl apply -f k8s/namespace.yaml` | namespace `journal-api` |
 | 2 | `kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml` + `rollout status` de ambos | ADOT Collector y Fluent Bit listos **antes** de la app (para no perder la primera telemetría) |
-| 3 | lee `journal-api/credentials/database` y `journal-api/credentials/llm` de Secrets Manager, y `/journal-api/{OPENAI_BASE_URL,OPENAI_MODEL,ACME_EMAIL}` de SSM | credenciales con `GetSecretValue`; config con `GetParameter` |
-| 4 | crea/actualiza `journal-db`, `journal-secrets` y `ecr-credential` con `--dry-run=client -o yaml \| kubectl apply -f -` | Secrets idempotentes |
+| 3 | lee `/journal-api/{OPENAI_BASE_URL,OPENAI_MODEL,ACME_EMAIL}` de SSM Parameter Store | solo configuración no sensible, con `GetParameter` |
+| 4 | crea/actualiza el ConfigMap `journal-config` y el pull secret `ecr-credential`, y borra los Secrets `journal-secrets`/`journal-db` | el deploy no toca material sensible: las credenciales las baja el init container de cada pod, con el rol de servicio de la app |
 | 5 | `sed` de `__PUBLIC_IP__` y `__ACME_EMAIL__` en `k8s/caddy.yaml` + `kubectl apply` de `postgresql.yaml`, `service.yaml` y `caddy.yaml` + espera Postgres | la IP la resuelve el nodo por IMDSv2 y el email viene de SSM: ninguno de los dos está hardcodeado |
 | 6 | `kubectl exec -i deploy/postgres -- psql ... < database_setup.sql` | esquema idempotente en cada deploy |
 | 7 | `sed s|journal-api:placeholder|journal-api:<sha>|` + `kubectl apply` + `rollout status deployment/journal-api` | imagen exacta del commit, con timeout de 240 s |
@@ -166,19 +170,46 @@ Por eso la siembra es **fuera de banda**, con un script que corre una sola vez:
 ./scripts/migrate-secrets.sh --dry-run  # muestra el plan sin escribir
 ```
 
-### Quién puede leerlos (IAM mínimo + negaciones explícitas)
+### Quién puede leerlos (identidades separadas + negaciones explícitas)
 
-El rol `journal-ssm-role` (instance profile de la EC2) tiene:
+Hay **dos identidades de servicio**, con permisos distintos:
 
-| Statement | Efecto |
+| Identidad | Qué puede hacer |
 |---|---|
-| **Allow** `secretsmanager:GetSecretValue` y `DescribeSecret` | solo sobre los **dos ARN exactos** de los secretos del proyecto |
-| **Deny** `GetSecretValue`, `DescribeSecret`, `PutSecretValue`, `UpdateSecret`, `DeleteSecret`, `ListSecrets` sobre cualquier otro secreto | un Deny explícito gana sobre cualquier Allow: aunque mañana se adjuntara una política amplia al rol, el acceso sigue acotado |
-| **Deny** `ssm:GetParameter*` sobre cualquier parámetro fuera de los tres de configuración | `AmazonSSMManagedInstanceCore` concede `ssm:GetParameters` sobre `*`; el Deny lo recorta |
+| `journal-api-runtime-role` (la app) | **solo** `GetSecretValue` y `DescribeSecret` sobre los **dos ARN exactos** de los secretos del proyecto |
+| `journal-ssm-role` (instance profile de la EC2) | **no puede leer secretos**: tiene un Deny explícito. Solo puede **delegar** en el rol de la app, y solo con el `ExternalId` correcto |
 
-Además cada secreto tiene una **resource policy** que nombra al rol. **Las dos
-políticas deben permitir la acción**: AWS evalúa la intersección de la identity
-policy y la resource policy.
+El `ExternalId` del `AssumeRole` es el `sub` del token de ServiceAccount del
+pod (`system:serviceaccount:journal-api:journal-api`), que se lee de
+`/var/run/secrets/kubernetes.io/serviceaccount/token`.
+
+Además cada secreto tiene una **resource policy** que nombra al **rol de la
+app** (no al de la instancia). **Las dos políticas deben permitir la acción**:
+AWS evalúa la intersección de la identity policy y la resource policy.
+
+> **Limitación conocida y asumida:** en k3s cualquier pod alcanza IMDS
+> (hop limit 2) y puede obtener las credenciales del instance profile, así que
+> el `ExternalId` protege del **uso accidental**, no de un atacante. El
+> aislamiento real por pod exige que AWS valide el token criptográficamente
+> (IRSA o EKS Pod Identity), que necesita un issuer OIDC público — inviable
+> con una IP de `sslip.io` que Terraform reasigna en cada `destroy/apply`.
+
+### Cómo llega el secreto al proceso, sin pasar por etcd
+
+```text
+Secrets Manager
+   │  GetSecretValue (journal-api-runtime-role, credenciales temporales de STS)
+   ▼
+init container del pod  ──►  emptyDir (medium: Memory, o sea tmpfs)
+   │                            /secrets/DATABASE_URL
+   │                            /secrets/OPENAI_API_KEY
+   ▼
+app: pydantic-settings lee el directorio (secrets_dir) → en memoria
+```
+
+El material sensible **no entra** al Secret de Kubernetes (etcd, base64) ni al
+spec del pod (legible por cualquiera con `get pods`). Postgres toma la
+password de un archivo (`POSTGRES_PASSWORD_FILE`).
 
 ### Rotación
 
@@ -228,32 +259,37 @@ run_on_instance() {
 | 7 | Notificación SNS operativa | `aws sns list-subscriptions-by-topic --topic-arn "$(terraform -chdir=terraform output -raw sns_alarms_topic_arn)" --query 'Subscriptions[].[Protocol,SubscriptionArn]' --output table` | `email` con ARN real, no `PendingConfirmation` | 1 suscripción confirmada |
 | 8 | HTTPS válido | `curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.215.52.10.sslip.io/version` | `200 0` | `200 0` (cert de Let's Encrypt para `3.215.52.10.sslip.io`) |
 | 9 | Los secretos están en Secrets Manager | `aws secretsmanager list-secrets --region us-east-1 --query 'SecretList[].[Name,RotationEnabled]' --output table` | los 2 secretos del proyecto | `journal-api/credentials/database`, `journal-api/credentials/llm` |
-| 10 | El valor del secreto llega **idéntico** al pod | comparar el `sha256` del Secret de k8s con el del secreto (comandos en la sección 5) | mismo hash | `bb09fe69365cfb8d…` en ambos |
-| 11 | El IAM no deja leer de más | `run_on_instance 'aws secretsmanager list-secrets --region us-east-1'` | `AccessDenied` | `AccessDeniedException ... with an explicit deny` (igual para un secreto fuera de scope y para el parámetro SSM viejo) |
+| 10 | El instance profile **no** puede leer los secretos | `run_on_instance 'aws secretsmanager get-secret-value --secret-id journal-api/credentials/llm'` | `AccessDenied` | `AccessDeniedException ... with an explicit deny` |
+| 11 | El IAM no deja leer de más | `run_on_instance 'aws secretsmanager list-secrets --region us-east-1'` | `AccessDenied` | `AccessDeniedException` (igual para un secreto fuera de scope y para el parámetro SSM viejo) |
 | 12 | El valor **nunca** estuvo en el estado | buscar el valor en `terraform.tfstate` y `.backup` | ausente | ausente en ambos, y en todo archivo versionado del repo |
-| 13 | El análisis con el proveedor real | `curl -sS -X POST "https://3.215.52.10.sslip.io/entries/<id>/analyze"` | `200` con `sentiment`, `summary` y `topics` | `200` en 2,48 s, con la salida de `gpt-4o-mini` |
-| 14 | La telemetría del análisis se registra | `aws cloudwatch get-metric-statistics --namespace JournalAPI --metric-name journal.analysis.duration --dimensions Name=llm_model,Value=gpt-4o-mini Name=OTelLib,Value=journal-api ...` | datapoints en los últimos minutos | 10 muestras en el bucket de 15:16 UTC, max 1922 ms |
-| 15 | Disco con margen | `run_on_instance 'df -h /'` | por debajo del 85 % | 20 GB, 6,8 GB usados (34 %) |
+| 13 | **No hay material sensible en etcd** | `run_on_instance 'kubectl -n journal-api get secret'` | solo el pull secret de ECR | `journal-secrets` y `journal-db` **no existen**; el pod los tiene en `/secrets` (tmpfs) |
+| 14 | La app usa su ServiceAccount | `run_on_instance 'kubectl -n journal-api get pod -l app=journal-api -o jsonpath="{.items[0].spec.serviceAccountName}"'` | `journal-api` | `journal-api` (su `sub` es el ExternalId del `AssumeRole`) |
+| 15 | El análisis con el proveedor real | `curl -sS -X POST "https://3.215.52.10.sslip.io/entries/<id>/analyze"` | `200` con `sentiment`, `summary` y `topics` | `200` en 2,48 s, con la salida de `gpt-4o-mini` |
+| 16 | La telemetría del análisis se registra | `aws cloudwatch get-metric-statistics --namespace JournalAPI --metric-name journal.analysis.duration --dimensions Name=llm_model,Value=gpt-4o-mini Name=OTelLib,Value=journal-api ...` | datapoints en los últimos minutos | 10 muestras en el bucket de 15:16 UTC, max 1922 ms |
+| 17 | Disco con margen | `run_on_instance 'df -h /'` | por debajo del 85 % | 20 GB, 6,8 GB usados (34 %) |
 
-### Hash: el valor llega intacto al pod
+### El secreto llega al pod sin pasar por etcd
 
 ```bash
-# En la instancia: hash de lo que el Secret de k8s le entrega al pod
-K=$(kubectl -n journal-api get secret journal-secrets \
-      -o jsonpath='{.data.OPENAI_API_KEY}' | base64 -d | sha256sum | cut -d' ' -f1)
+# En la instancia: que NO exista ningun Secret de credenciales en el namespace
+kubectl -n journal-api get secret
+#   NAME             TYPE                             DATA   AGE
+#   ecr-credential   kubernetes.io/dockerconfigjson   1      ...
+#   (journal-secrets y journal-db ya no existen)
 
-# Hash del valor guardado en Secrets Manager
-S=$(aws secretsmanager get-secret-value \
-      --secret-id journal-api/credentials/llm --region us-east-1 --output json \
-    | python3 -c "import json,sys; print(json.loads(json.load(sys.stdin)['SecretString'])['OPENAI_API_KEY'])" \
-    | sha256sum | cut -d' ' -f1)
+# Que el pod los tenga en su volumen tmpfs, con permisos 0600
+kubectl -n journal-api exec deploy/journal-api -- ls -l /secrets
+#   -rw------- 1 root root  ... DATABASE_URL
+#   -rw------- 1 root root  ... OPENAI_API_KEY
 
-[ "$K" = "$S" ] && echo "MATCH: el pod consume exactamente el valor de Secrets Manager" \
-                || echo "DIVERGENCIA: k8s=$K secrets=$S"
+# Que el instance profile NO pueda leerlos
+aws secretsmanager get-secret-value --secret-id journal-api/credentials/llm
+#   AccessDeniedException ... with an explicit deny
 ```
 
-Comparar **hashes** y no valores es lo que permite verificar la cadena completa
-sin exponer la credencial ni una sola vez en un log.
+Las tres comprobaciones juntas prueban la cadena: el valor sale de Secrets
+Manager, pasa por la identidad de servicio de la app, y llega al proceso sin
+haber pasado por etcd ni por el spec del pod.
 
 ## 5. ¿Lo desplegado es el commit actual?
 
@@ -294,6 +330,7 @@ Si los cuatro valores no coinciden, el diagnóstico está en
 | Fecha (UTC) | Commit | Run ID | `test` | `build` | `deploy` | Nota |
 |---|---|---|---|---|---|---|
 | 2026-10-23 15:13 | `57f60ee` | [39976466154](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39976466154) | ✅ | ✅ | ✅ | docs del runbook |
+| 2026-10-23 15:41 | `de3ebe8` | [39980400506](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39980400506) | ❌ | — | — | `gitleaks` encontró una clave de Azure App Insights en el historial **del repo de origen** (ver más abajo) |
 | 2026-10-23 15:06 | `0334382` | [39975355584](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39975355584) | ✅ | ✅ | ✅ | redeploy tras rotar la credencial |
 | 2026-10-23 14:47 | `0334382` | [39972651199](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39972651199) | ✅ | ✅ | ✅ | docs |
 | 2026-10-23 14:45 | `25a33e3` | [39972396525](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39972396525) | ✅ | ✅ | ✅ | primer deploy con el disco de 20 GB y la poda de imágenes |
@@ -307,7 +344,7 @@ Si los cuatro valores no coinciden, el diagnóstico está en
 | 2026-10-22 15:47 | `6c9001b` | [39808118539](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39808118539) | ✅ | ✅ | ✅ | |
 | 2026-10-22 15:43 | `f37087b` | [39807526706](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39807526706) | ✅ | ✅ | ❌ | clon shallow sin `origin/main` |
 
-Los tres runs en rojo se conservan porque **documentan los fallos reales del
+Los cuatro runs en rojo se conservan porque **documentan los fallos reales del
 pipeline y su corrección**, que es la parte que un reviewer de un capstone
 quiere ver:
 
@@ -316,6 +353,7 @@ quiere ver:
 | `39807526706` | `unknown revision origin/main` | clon *shallow* sin la ref completa | `git reset --hard FETCH_HEAD` (`6c9001b`) |
 | `39967596214` | `tlsv1 alert internal error` | Caddy tenía la IP vieja hardcodeada en `k8s/caddy.yaml` y pedía el certificado de una IP que ya no era suya; además `admin@example.com` es rechazado por Let's Encrypt | placeholders `__PUBLIC_IP__` / `__ACME_EMAIL__` resueltos en deploy time (`ddf79dc`) |
 | `39969565199` | `error: timed out waiting for the condition` y endpoint en `502` | `DiskPressure`: el kubelet evictó 28 pods porque el volumen raíz de 8 GB se llenó con una imagen por commit | volumen raíz de 20 GB + poda de imágenes en cada deploy (`25a33e3`) |
+| `39980400506` | el job `test` falla en el paso de `gitleaks` | una connection string de Azure App Insights comiteada en **febrero de 2025 en el historial del repo de origen**, heredada por el fork. No es una credencial de este fork | allowlist por `commits` + `paths` en `.gitleaks.toml` (`402d669`), con el triage documentado en [runbook.md](runbook.md#13-el-escaneo-de-secretos-falla-el-pipeline) |
 
 > El síntoma del último es el más engañoso de los tres: el deploy "aplicaba
 > bien", el pod nuevo no quedaba `Ready` y el endpoint daba `502`, lo que
@@ -364,6 +402,8 @@ usa `CREATE TABLE IF NOT EXISTS` y los manifiestos se aplican por nombre.
 | Imagen, Terraform, manifiestos y pipeline integrados | secciones 1 y 2; `deploy-k8s.sh` es el punto de unión |
 | Deploy reproducible y verificable | jobs `build`/`deploy` + `/version` == SHA (sección 5) |
 | Secretos fuera del repo y fuera del estado | sección 3 + verificaciones 9 a 12 de la sección 4 |
+| Identidad de servicio propia de la app | sección 3: la app asume `journal-api-runtime-role` y el instance profile ya no puede leer los secretos |
+| Security checks en el pipeline | `gitleaks` en `test` + `scripts/verify-security.sh` en `deploy` |
 | Permisos mínimos y denegaciones comprobadas | sección 3 + verificación 11 |
 | Rotación documentada y ejecutable | [runbook.md](runbook.md#12-rotar-un-secreto) |
 | Observación documentada | [observability.md](observability.md) y [deployment-ec2.md](deployment-ec2.md) |
