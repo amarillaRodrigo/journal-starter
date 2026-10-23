@@ -103,6 +103,31 @@ ssm_get() {
     --query 'Parameter.Value' --output text
 }
 
+# Lee una credencial y devuelve su valor.
+#
+# Primero intenta el parametro de SSM (la fuente original). Si ya se limpio
+# con --cleanup-ssm, cae al secreto en Secrets Manager, para que el script
+# siga siendo re-ejecutable sin volver a sembrar nada.
+cred_value() {
+  local ssm_name="$1" secret_id="$2" key="$3"
+  local value=""
+  value="$(aws ssm get-parameter --name "${ssm_name}" --region "${REGION}" \
+             --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true)"
+  if [ -n "${value}" ] && [ "${value}" != "None" ]; then
+    printf '%s' "${value}"
+    return 0
+  fi
+  aws secretsmanager get-secret-value --secret-id "${secret_id}" --region "${REGION}" \
+    --output json 2>/dev/null \
+  | "${PY}" -c 'import json, sys
+raw = json.load(sys.stdin).get("SecretString", "")
+try:
+    data = json.loads(raw)
+except ValueError:
+    data = {"VALUE": raw}
+sys.stdout.write(str(data.get(sys.argv[1], data.get("VALUE", ""))))' "${key}"
+}
+
 put_secret() {
   local secret_id="$1" payload="$2"
   if [ "${DRY_RUN}" -eq 1 ]; then
@@ -148,8 +173,8 @@ fi
 # ---------------------------------------------------------------
 say "==> Leyendo credenciales desde SSM Parameter Store (${SSM_PREFIX})"
 
-PGPASS="$(ssm_get "${SSM_PREFIX}/POSTGRES_PASSWORD")"
-OPENAI_KEY="$(ssm_get "${SSM_PREFIX}/OPENAI_API_KEY")"
+PGPASS="$(cred_value "${SSM_PREFIX}/POSTGRES_PASSWORD" "${SECRET_DATABASE}" POSTGRES_PASSWORD)"
+OPENAI_KEY="$(cred_value "${SSM_PREFIX}/OPENAI_API_KEY" "${SECRET_LLM}" OPENAI_API_KEY)"
 
 # La password cruda se usa para POSTGRES_PASSWORD (el contenedor de Postgres la
 # toma literal). Dentro de la URL va URL-encoded: si la password tuviera @ o /,
