@@ -281,17 +281,17 @@ run_on_instance "free -m; df -h /; dmesg -T | grep -i -E 'oom|killed process' | 
 
 ---
 
-## 6. La app devuelve 500 o 503
+## 6. La app devuelve 500 o 502
 
 **Síntoma:** `/version` responde 200 pero `/entries` devuelve 500, o
-`POST /entries/{id}/analyze` devuelve 503.
+`POST /entries/{id}/analyze` devuelve 502.
 
 **Diagnóstico:**
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' https://3.215.52.10.sslip.io/entries
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://3.215.52.10.sslip.io/entries \
-  -H 'Content-Type: application/json' -d '{"title":"t","content":"c"}'
+  -H 'Content-Type: application/json' -d '{"work":"t","struggle":"s","intention":"i"}'
 
 run_on_instance "$K kubectl -n journal-api get pods"
 run_on_instance "$K kubectl -n journal-api logs deploy/journal-api --tail=100"
@@ -313,17 +313,40 @@ En CloudWatch Logs, la query guardada `journal-api/errores-5xx` muestra el
 - **Esquema ausente:** la tabla `entries` no existe porque el paso
   `database_setup.sql` falló y `set -e` cortó el deploy (en ese caso el deploy
   no debería estar verde).
-- **Proveedor LLM sin crédito:** `429 insufficient_quota` → la API responde
-  **503** solo en `/analyze`; es el comportamiento esperado y está documentado
-  en [observability.md](observability.md#limitaciones-conocidas). El resto de la
+- **Proveedor LLM sin crédito:** `429 insufficient_quota`
+  (`credit_balance_exhausted`) → la API responde **502** solo en `/analyze`; es
+  el comportamiento esperado y está documentado en
+  [observability.md](observability.md#limitaciones-conocidas). El resto de la
   API sigue funcionando.
+- **Credencial del proveedor inválida:** `401 Unauthorized` en
+  `POST https://api.openai.com/v1/responses` → la key expiró, se revocó o se
+  creó sin permisos para la Responses API.
+
+  > **Ojo: la app devuelve el mismo 502 para 401 y para 429.** Hay que mirar el
+  > log del pod para distinguir "key mala" de "sin crédito". Se distingue sin
+  > la app, leyendo la key desde Secrets Manager:
+  >
+  > ```bash
+  > KEY=$(aws secretsmanager get-secret-value --secret-id journal-api/credentials/llm \
+  >   --region us-east-1 --output json \
+  >   | python3 -c "import json,sys; print(json.loads(json.load(sys.stdin)['SecretString'])['OPENAI_API_KEY'])")
+  >
+  > # 200 = la key autentica bien (el problema es el saldo)
+  > curl -sS -o /dev/null -w '%{http_code}\n' https://api.openai.com/v1/models \
+  >   -H "Authorization: Bearer $KEY"
+  >
+  > # 429 = la key vale pero la organización no tiene crédito
+  > curl -sS -X POST https://api.openai.com/v1/responses \
+  >   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  >   -d '{"model":"gpt-4o-mini","input":"hola"}'
+  > ```
 
 **Fix:**
 
 - Postgres: `kubectl -n journal-api rollout restart deploy/postgres`, esperar
   readiness y reintentar.
 - Credenciales: re-ejecutar `sudo bash /opt/journal-api/scripts/deploy-k8s.sh <sha>`
-  para recrear ambos Secrets desde SSM.
+  para recrear ambos Secrets desde Secrets Manager.
 - Esquema: aplicar `database_setup.sql` con el comando del paso 6 del
   [deploy](delivery.md#orden-exacto-de-scriptsdeploy-k8ssh-sha); es idempotente.
 - LLM: cargar crédito o cambiar el proveedor; no es un fallo de la plataforma.

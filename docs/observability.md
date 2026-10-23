@@ -349,7 +349,7 @@ total subiría a ~$35/mes; de ahí la poda de cardinalidad.
 ## Limitaciones conocidas
 
 - El proveedor LLM devuelve `429 insufficient_quota` (sin crédito), por lo que
-  `POST /entries/{id}/analyze` responde `503`. La traza y la métrica
+  `POST /entries/{id}/analyze` responde `502`. La traza y la métrica
   `journal.analysis.duration` se generan igual; el span queda con `fault`.
 - Las métricas EMF tardan ~1–2 minutos en aparecer en CloudWatch; una alarma de
   1 periodo reacciona en ese orden de magnitud.
