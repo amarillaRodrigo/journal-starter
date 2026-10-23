@@ -251,10 +251,10 @@ run_on_instance() {
 | # | Qué se verifica | Comando exacto | Resultado esperado | Observado (2026-10-23) |
 |---|---|---|---|---|
 | 1 | Terraform aplicado y sin drift | `cd terraform && terraform output` | `api_url`, `public_ip`, `ecr_image`, ARNs de alarmas y topic | `api_url = https://3.215.52.10.sslip.io` |
-| 2 | Imagen del commit en ECR | `aws ecr describe-images --repository-name journal-api --query 'sort_by(imageDetails,&imagePushedAt)[-1].[imageTags,imagePushedAt]' --output json` | el tag contiene el SHA de `HEAD` | `["57f60ee...","latest"]`, push 12:15 UTC |
+| 2 | Imagen del commit en ECR | `aws ecr describe-images --repository-name journal-api --query 'sort_by(imageDetails,&imagePushedAt)[-1].[imageTags,imagePushedAt]' --output json` | el tag contiene el SHA de `HEAD` | `["ff4b6ef...","latest"]` |
 | 3 | Cluster sano | `run_on_instance 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; kubectl -n journal-api get pods -o wide'` | 5 pods `Running` (`journal-api`, `postgres`, `caddy`, `adot-collector`, `fluent-bit`) | 5/5 `Running`, 0 reinicios |
-| 4 | La API corre ese SHA | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"<sha de HEAD>"}` | `{"commit":"57f60eed0cc650b7ab41d98f99f3f04748bbfc78"}` |
-| 5 | La imagen desplegada es la del tag | `run_on_instance '... kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:<sha de HEAD>` | `...journal-api:57f60ee...` |
+| 4 | La API corre ese SHA | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"<sha de HEAD>"}` | `{"commit":"ff4b6efc5632f62ffd61653578afe2fef9e0a13e"}` |
+| 5 | La imagen desplegada es la del tag | `run_on_instance '... kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:<sha de HEAD>` | `...journal-api:ff4b6ef...` |
 | 6 | Alarmas activas | `aws cloudwatch describe-alarms --alarm-name-prefix journal-api --query 'MetricAlarms[].[AlarmName,StateValue]' --output table` | 2 alarmas en `OK` (o `ALARM` si hay incidente real) | `journal-api-http-5xx OK`, `journal-api-latency-p95 OK` |
 | 7 | Notificación SNS operativa | `aws sns list-subscriptions-by-topic --topic-arn "$(terraform -chdir=terraform output -raw sns_alarms_topic_arn)" --query 'Subscriptions[].[Protocol,SubscriptionArn]' --output table` | `email` con ARN real, no `PendingConfirmation` | 1 suscripción confirmada |
 | 8 | HTTPS válido | `curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://3.215.52.10.sslip.io/version` | `200 0` | `200 0` (cert de Let's Encrypt para `3.215.52.10.sslip.io`) |
@@ -295,12 +295,12 @@ haber pasado por etcd ni por el spec del pod.
 
 La trazabilidad se apoya en cuatro valores que deben coincidir **exactamente**:
 
-| Fuente | Comando | Verificado el 2026-10-23 (commit `57f60ee`) |
+| Fuente | Comando | Verificado el 2026-10-23 (commit `ff4b6ef`) |
 |---|---|---|
-| Commit local | `git rev-parse HEAD` | `57f60eed0cc650b7ab41d98f99f3f04748bbfc78` |
-| Tag de la imagen en ECR | `aws ecr describe-images --repository-name journal-api --image-ids imageTag=$(git rev-parse HEAD) --query 'imageDetails[0].imageTags' --output json` | `["57f60ee...","latest"]` |
-| Tag que corre Kubernetes | `run_on_instance '... kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:57f60ee...` |
-| SHA que responde la app | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"57f60ee..."}` |
+| Commit local | `git rev-parse HEAD` | `ff4b6efc5632f62ffd61653578afe2fef9e0a13e` |
+| Tag de la imagen en ECR | `aws ecr describe-images --repository-name journal-api --image-ids imageTag=$(git rev-parse HEAD) --query 'imageDetails[0].imageTags' --output json` | `["ff4b6ef...","latest"]` |
+| Tag que corre Kubernetes | `run_on_instance '... kubectl -n journal-api get deploy/journal-api -o jsonpath="{.spec.template.spec.containers[0].image}"'` | `.../journal-api:ff4b6ef...` |
+| SHA que responde la app | `curl -fsS https://3.215.52.10.sslip.io/version` | `{"commit":"ff4b6ef..."}` |
 
 Comparación en un solo paso:
 
@@ -329,8 +329,14 @@ Si los cuatro valores no coinciden, el diagnóstico está en
 
 | Fecha (UTC) | Commit | Run ID | `test` | `build` | `deploy` | Nota |
 |---|---|---|---|---|---|---|
-| 2026-10-23 15:13 | `57f60ee` | [39976466154](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39976466154) | ✅ | ✅ | ✅ | docs del runbook |
+| 2026-10-23 16:14 | `ff4b6ef` | [39985114392](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39985114392) | ✅ | ✅ | ✅ | verificación de seguridad por readiness (no por DNS del cluster) |
+| 2026-10-23 16:13 | `05b7241` | [39985002031](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39985002031) | ✅ | ✅ | ✅ | `imagePullSecrets` en el pod de Postgres |
+| 2026-10-23 16:02 | `2e56ef0` | [39983351172](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39983351172) | ✅ | ✅ | ❌ | heredó el bug de `imagePullSecrets` |
+| 2026-10-23 15:56 | `04768de` | [39982582417](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39982582417) | ✅ | ✅ | ❌ | `imagePullSecrets` faltando en el init container de Postgres |
+| 2026-10-23 15:46 | `402d669` | [39981214272](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39981214272) | ✅ | ✅ | ✅ | allowlist de gitleaks |
 | 2026-10-23 15:41 | `de3ebe8` | [39980400506](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39980400506) | ❌ | — | — | `gitleaks` encontró una clave de Azure App Insights en el historial **del repo de origen** (ver más abajo) |
+| 2026-10-23 15:28 | `1bade0d` | [39978508823](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39978508823) | ✅ | ✅ | ✅ | docs |
+| 2026-10-23 15:13 | `57f60ee` | [39976466154](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39976466154) | ✅ | ✅ | ✅ | docs del runbook |
 | 2026-10-23 15:06 | `0334382` | [39975355584](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39975355584) | ✅ | ✅ | ✅ | redeploy tras rotar la credencial |
 | 2026-10-23 14:47 | `0334382` | [39972651199](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39972651199) | ✅ | ✅ | ✅ | docs |
 | 2026-10-23 14:45 | `25a33e3` | [39972396525](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39972396525) | ✅ | ✅ | ✅ | primer deploy con el disco de 20 GB y la poda de imágenes |
@@ -344,7 +350,7 @@ Si los cuatro valores no coinciden, el diagnóstico está en
 | 2026-10-22 15:47 | `6c9001b` | [39808118539](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39808118539) | ✅ | ✅ | ✅ | |
 | 2026-10-22 15:43 | `f37087b` | [39807526706](https://github.com/amarillaRodrigo/journal-starter/actions/runs/39807526706) | ✅ | ✅ | ❌ | clon shallow sin `origin/main` |
 
-Los cuatro runs en rojo se conservan porque **documentan los fallos reales del
+Los cinco runs en rojo se conservan porque **documentan los fallos reales del
 pipeline y su corrección**, que es la parte que un reviewer de un capstone
 quiere ver:
 
@@ -354,6 +360,13 @@ quiere ver:
 | `39967596214` | `tlsv1 alert internal error` | Caddy tenía la IP vieja hardcodeada en `k8s/caddy.yaml` y pedía el certificado de una IP que ya no era suya; además `admin@example.com` es rechazado por Let's Encrypt | placeholders `__PUBLIC_IP__` / `__ACME_EMAIL__` resueltos en deploy time (`ddf79dc`) |
 | `39969565199` | `error: timed out waiting for the condition` y endpoint en `502` | `DiskPressure`: el kubelet evictó 28 pods porque el volumen raíz de 8 GB se llenó con una imagen por commit | volumen raíz de 20 GB + poda de imágenes en cada deploy (`25a33e3`) |
 | `39980400506` | el job `test` falla en el paso de `gitleaks` | una connection string de Azure App Insights comiteada en **febrero de 2025 en el historial del repo de origen**, heredada por el fork. No es una credencial de este fork | allowlist por `commits` + `paths` en `.gitleaks.toml` (`402d669`), con el triage documentado en [runbook.md](runbook.md#13-el-escaneo-de-secretos-falla-el-pipeline) |
+| `39982582417` | el pod de Postgres queda en `Init:ErrImagePull` y el deploy se corta en "esperando Postgres" | el init container pulla la imagen de la app desde **ECR, que es privado**, y al manifiesto le faltaba `imagePullSecrets` (el manifiesto viejo solo usaba `postgres:16-alpine` de Docker Hub) | `imagePullSecrets` en el pod de Postgres (`05b7241`) |
+
+> Los dos últimos fallos tienen un rasgo común que vale la pena: **el síntoma
+> apuntaba a un sitio y la causa estaba en otro**. `DiskPressure` parecía un
+> problema de imagen; el `ErrImagePull` parecía un problema de credenciales de
+> ECR y era un `imagePullSecrets` ausente en el manifiesto. Por eso el job de
+> `deploy` comprueba el estado real del cluster y no solo el exit code.
 
 > El síntoma del último es el más engañoso de los tres: el deploy "aplicaba
 > bien", el pod nuevo no quedaba `Ready` y el endpoint daba `502`, lo que
