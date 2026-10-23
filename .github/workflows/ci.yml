@@ -56,6 +56,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks revisa el historial completo, no solo el ultimo commit:
+          # un secreto filtrado sigue vivo en el historial aunque se borre.
+          fetch-depth: 0
+
+      - name: Scan the history for committed secrets (gitleaks)
+        run: |
+          set -euo pipefail
+          GL_VERSION="8.30.1"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          # --redact no imprime el valor encontrado, solo donde esta.
+          ./gitleaks detect --source . --redact --no-banner --verbose --exit-code 1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -198,6 +211,52 @@ jobs:
             --query StandardErrorContent --output text || true
 
           test "$STATUS" = "Success"
+
+      - name: Verify the security properties on the instance
+        run: |
+          set -euo pipefail
+
+          # Un deploy verde dice que el rollout convergió, no que la seguridad
+          # siga en pie. Este paso corre las comprobaciones dentro de la
+          # instancia: que el pod consuma el valor de Secrets Manager, que el
+          # IAM siga denegando lo que debe y que no haya credenciales en
+          # texto plano en el spec de los pods.
+          IID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=journal-api-instance" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          echo "Instancia: $IID"
+
+          CID=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "verify-security" \
+            --parameters 'commands=["cd /opt/journal-api && bash scripts/verify-security.sh"]' \
+            --query 'Command.CommandId' --output text)
+          echo "CommandId: $CID"
+
+          STATUS="Pending"
+          for i in $(seq 1 40); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CID" \
+              --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+
+          echo "===== verify-security.sh ====="
+          OUT=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" \
+            --query StandardOutputContent --output text)
+          echo "$OUT"
+
+          # El exit code remoto no viaja en el Status, asi que el script deja
+          # un sentinel explicito y el job lo busca.
+          if ! printf '%s' "$OUT" | grep -q "RESULTADO_SEGURIDAD: OK"; then
+            echo "::error::La verificacion de seguridad fallo (ver la salida arriba)"
+            exit 1
+          fi
+          echo "OK: las propiedades de seguridad se cumplen"
 
       - name: Verify the public endpoint runs the new commit
         env:
