@@ -320,6 +320,18 @@ resource "aws_instance" "journal_api" {
   vpc_security_group_ids = [aws_security_group.journal_sg.id]
   iam_instance_profile   = aws_iam_instance_profile.journal_ssm_profile.name
 
+  # El volumen raíz por defecto del t3.small son 8 GB, y no alcanzan para k3s +
+  # containerd: containerd conserva una imagen por commit (el tag es el SHA) y
+  # el overlayfs llega a 1.5 GB con una sola versión. Al 85 % el kubelet entra
+  # en DiskPressure y evicta pods en masa, el rollout nunca converge y el
+  # endpoint queda en 502. 20 GB en gp3 da margen de sobra para las dos
+  # cosas: las imagenes y los logs de los pods.
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 20
+    encrypted   = true
+  }
+
   # IMDSv2 obligatorio y hop limit 2 para que los pods (ADOT/Fluent Bit)
   # obtengan las credenciales del instance role sin secretos estaticos.
   metadata_options {

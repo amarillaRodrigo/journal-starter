@@ -69,6 +69,13 @@ sys.stdout.write(str(data.get(sys.argv[1], data.get("VALUE", ""))))' "${key}" 2>
   return 1
 }
 
+echo "==> Liberando disco (imagenes sin uso en containerd)"
+# containerd guarda una imagen por commit (el tag es el SHA). Sin esta poda el
+# nodo acumula capas y termina en DiskPressure: el kubelet evicta pods en masa
+# y el rollout nunca converge.
+sudo k3s crictl rmi --prune >/dev/null 2>&1 || true
+df -h / | tail -1
+
 echo "==> Namespace"
 kubectl apply -f k8s/namespace.yaml
 
