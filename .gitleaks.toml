@@ -1,0 +1,32 @@
+title = "journal-starter: configuracion de gitleaks"
+
+[extend]
+# Se extiende la configuracion por defecto de gitleaks (unas 180 reglas).
+useDefault = true
+
+[[allowlists]]
+description = """
+Clave de instrumentacion de Azure Application Insights, comiteada en febrero
+de 2025 en .vscode/launch.json y en README.md de este repositorio publico.
+
+La allowlist combina `commits` y `paths`: perdona un hallazgo solo si esta en
+uno de esos dos commits Y en uno de esos dos archivos. Cualquier otro secreto
+que estuviera en esos mismos commits, o en esos archivos en otro commit, sigue
+siendo detectado.
+
+La remediacion real es la ROTACION de la clave en Azure (el allowlist solo
+mantiene verde el pipeline; un allowlist no invalida una credencial). El arbol
+actual esta limpio: ni .vscode/launch.json ni README.md contienen la
+connection string.
+
+El historial no se reescribe porque los SHA de esos commits son evidencia del
+capstone (ver docs/delivery.md, seccion 6).
+"""
+commits = [
+  "b3aa0d4ea38a7fdca785908a371dfb9a5d0a7ae7",
+  "f95f5904c150c3d3b3902ab4e4958a84902b4e29",
+]
+paths = [
+  '''(^|/)\.vscode/launch\.json$''',
+  '''(^|/)README\.md$''',
+]
