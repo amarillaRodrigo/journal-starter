@@ -8,6 +8,7 @@ the Aspire Dashboard deployed from ``k8s/aspire-dashboard.yaml``.
 
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -118,6 +119,18 @@ _LATENCY_LOCK = Lock()
 
 _IGNORED_PATHS = {"/version", "/openapi.json", "/docs", "/redoc", "/favicon.ico"}
 
+# Las mismas rutas se excluyen del TRACING, no solo de las metricas.
+#
+# Los probes de Kubernetes (liveness/readiness) pegan contra /version cada
+# pocos segundos y cada span es un trace que X-Ray guarda. El limite gratis
+# son 100.000 traces al mes: sin este filtro el servicio se pasa el limite
+# solo, porque el 100% del trafico de esta API son probes y no usuarios.
+#
+# El SDK evalua los regexes con search() contra la URL completa
+# ("http://host:puerto/ruta"), asi que se ancla al final: /version$ no
+# captura rutas que solo la contengan (p.ej. /entries/version-notes).
+EXCLUDED_TRACE_URLS = ",".join(f"{re.escape(path)}$" for path in sorted(_IGNORED_PATHS))
+
 
 def record_http_latency(duration_ms: float) -> None:
     """Agregar una medición a la ventana usada por los gauges de percentiles."""
@@ -180,4 +193,4 @@ def instrument_app(app: FastAPI) -> None:
     """Instrumentar FastAPI con OpenTelemetry."""
     app.add_middleware(TelemetryMiddleware)
     if not _SDK_DISABLED:
-        FastAPIInstrumentor.instrument_app(app)
+        FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_TRACE_URLS)

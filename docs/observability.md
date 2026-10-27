@@ -82,6 +82,17 @@ percentiles; excluye `/version`, `/openapi.json`, `/docs`, `/redoc` y
 negocio. `OTEL_SDK_DISABLED=true` desactiva exporters y threads de red (lo usa
 el job `test` de CI).
 
+Las mismas rutas se excluyen también del **tracing**
+(`FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_TRACE_URLS)`),
+no solo de las métricas. El motivo es el costo: cada span es un trace que
+X-Ray guarda, y este servicio no tiene tráfico de usuarios, solo sondas. Con
+readiness cada 5 s y liveness cada 15 s eran ~16 sondas por minuto, es decir
+~23.000 traces al día contra los 100.000/mes que da el Free Tier: la alerta de
+límite la disparaba el propio Kubernetes. Los regexes se anclan al final
+(`/version$`) porque el SDK los evalúa con `search()` contra la URL completa
+(`http://host:puerto/ruta`), y así no se capturan rutas que solo la contengan
+(`/entries/version-notes`).
+
 ## 5.2 Trazas en X-Ray
 
 El collector exporta al backend `awsxray`; los spans quedan agrupados por traza
@@ -117,9 +128,9 @@ aws xray get-trace-summaries \
 ```
 
 En la ventana de verificación X-Ray devolvió **128 trazas** solo para requests a
-`/entries` (más las de `/version` de los probes), incluyendo `GET /entries`,
-`GET /entries/{id}`, `POST /entries`, `PATCH /entries/{id}` y
-`POST /entries/{id}/analyze`.
+`/entries` —las de `/version` de los probes ya no se generan, ver §5.1—,
+incluyendo `GET /entries`, `GET /entries/{id}`, `POST /entries`,
+`PATCH /entries/{id}` y `POST /entries/{id}/analyze`.
 
 ## 5.3 Métricas en CloudWatch
 
@@ -339,8 +350,8 @@ Precios on-demand de `us-east-1` (octubre 2026), instancia encendida 730 h/mes:
 | CloudWatch métricas custom (15 series × $0.30) | ~$4.50/mes |
 | CloudWatch Logs (ingesta ~50 MB + retención 7 días) | ~$0.10/mes |
 | Alarmas (2 × $0.10) | $0.20/mes |
-| X-Ray (trazas muestreadas) | ~$0.10/mes |
-| **Total incremental de observabilidad** | **≈ $4.90/mes** |
+| X-Ray (traces de tráfico real; los probes ya no se trazan) | ~$0.00/mes |
+| **Total incremental de observabilidad** | **≈ $4.80/mes** |
 | **Costo total del stack** (EC2 + EBS + IPv4 + ECR + observabilidad) | **≈ $25/mes** |
 
 Sin el filtro de `http.server.*` serían 47 series de métricas (~$14/mes) y el

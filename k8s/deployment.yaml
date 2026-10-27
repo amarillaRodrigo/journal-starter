@@ -82,18 +82,23 @@ spec:
               value: journal-api
             - name: ENVIRONMENT
               value: production
+          # Probes con periodSeconds altos a proposito: cada probe es un request
+          # al pod. Con readiness cada 5s y liveness cada 15s eran 16 sondas por
+          # minuto, todas contra /version, y cada una era un trace en X-Ray
+          # (limite gratis: 100.000 traces/mes). A 10s y 30s el trafico de
+          # sondas baja a 8 por minuto y el rollout sigue convergiendo igual.
           readinessProbe:
             httpGet:
               path: /version
               port: http
             initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /version
               port: http
             initialDelaySeconds: 30
-            periodSeconds: 15
+            periodSeconds: 30
           resources:
             requests:
               memory: "96Mi"
