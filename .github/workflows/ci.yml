@@ -180,8 +180,12 @@ jobs:
             --query 'Reservations[0].Instances[0].InstanceId' --output text)
           echo "Instancia: $IID"
 
+          # El nodo trae los manifiestos del repo que corre este workflow
+          # (github.repository), no de su remoto "origin": asi el deploy usa
+          # siempre el codigo que se esta construyendo, sin depender de como
+          # este configurado el clone del nodo.
           cat > /tmp/ssm.json <<JSON
-          {"commands":["cd /opt/journal-api && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD && bash scripts/deploy-k8s.sh ${GITHUB_SHA}"]}
+          {"commands":["cd /opt/journal-api && git fetch --depth 1 https://github.com/${{ github.repository }}.git main && git reset --hard FETCH_HEAD && bash scripts/deploy-k8s.sh ${GITHUB_SHA}"]}
           JSON
 
           CID=$(aws ssm send-command \
