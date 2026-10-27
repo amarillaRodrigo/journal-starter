@@ -32,6 +32,18 @@ variable "github_repository" {
   default     = "amarillaRodrigo/journal-starter"
 }
 
+variable "github_pipeline_repository" {
+  description = <<-EOT
+    Repo espejo (owner/repo) donde corre el pipeline de GitHub Actions.
+    GitHub deshabilito Actions en el fork "journal-starter" del lado de su
+    plataforma: la API responde enabled=true y un PUT devuelve 204, pero todo
+    trigger falla con HTTP 422 y solo soporte de GitHub puede limpiarlo.
+    El CI/CD corre aqui, con el mismo codigo y los mismos workflows.
+  EOT
+  type        = string
+  default     = "amarillaRodrigo/journal-starter-pipeline"
+}
+
 variable "acme_email" {
   description = "Email de contacto para el registro ACME (Caddy / Let's Encrypt). Si se deja vacío se usa alarm_email."
   type        = string
@@ -44,6 +56,9 @@ locals {
   repo_url     = "https://github.com/${var.github_repository}.git"
   gh_owner     = split("/", var.github_repository)[0]
   gh_repo      = split("/", var.github_repository)[1]
+
+  gh_pipeline_owner = split("/", var.github_pipeline_repository)[0]
+  gh_pipeline_repo  = split("/", var.github_pipeline_repository)[1]
 
   # Email de contacto para el registro ACME de Caddy. Reutiliza el de las
   # alarmas si no se define uno propio, para no duplicar el dato en
@@ -205,9 +220,13 @@ resource "aws_iam_role" "github_actions" {
         StringLike = {
           # GitHub agrega IDs inmutables al claim sub (owner@id/repo@id), por eso
           # los comodines. build corre en main; deploy en el environment production.
+          # El repo espejo tambien esta autorizado: es donde GitHub permite
+          # ejecutar Actions, porque en el fork los deshabilito la plataforma.
           "token.actions.githubusercontent.com:sub" = [
             "repo:${local.gh_owner}@*/${local.gh_repo}@*:ref:refs/heads/main",
             "repo:${local.gh_owner}@*/${local.gh_repo}@*:environment:production",
+            "repo:${local.gh_pipeline_owner}@*/${local.gh_pipeline_repo}@*:ref:refs/heads/main",
+            "repo:${local.gh_pipeline_owner}@*/${local.gh_pipeline_repo}@*:environment:production",
           ]
         }
       }
