@@ -524,6 +524,18 @@ resource "aws_cloudwatch_log_metric_filter" "iam_credential_changes" {
 # minutos de delay, asi que un periodo largo solo agrega latencia sin
 # agregar informacion. treat_missing_data = notBreaching para que la
 # alarma no se quede pegada en ALARM cuando no hay eventos nuevos.
+#
+# evaluation_periods = 3 (no 1) por la latencia de entrega. El trail
+# entrega en lotes (hasta ~15 minutos) y el metric filter publica la
+# metrica ~2 minutos despues. Con evaluation_periods = 1 la alarma evalua
+# el minuto anterior en el momento en que todavia no hay dato, y se
+# pierde el evento: la metrica "SecurityGroupChanges" llego a 2 y la alarma
+# nunca salio de OK (verificado el 2026-11-05).
+#
+# Con 3 periodos evaluados y datapoints_to_alarm = 1, la alarma dispara en
+# el primer datapoint que breacha dentro de la ventana de 3 minutos: la
+# latencia de entrega deja de ser una ventana por la que se escapa un
+# evento.
 
 resource "aws_cloudwatch_metric_alarm" "security_group_changed" {
   alarm_name          = "${var.project}-security-sg-changed"
@@ -532,7 +544,7 @@ resource "aws_cloudwatch_metric_alarm" "security_group_changed" {
   metric_name         = "SecurityGroupChanges"
   statistic           = "Sum"
   period              = 60
-  evaluation_periods  = 1
+  evaluation_periods  = 3
   datapoints_to_alarm = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -549,7 +561,7 @@ resource "aws_cloudwatch_metric_alarm" "console_login_failure" {
   metric_name         = "ConsoleLoginFailures"
   statistic           = "Sum"
   period              = 60
-  evaluation_periods  = 1
+  evaluation_periods  = 3
   datapoints_to_alarm = 1
   threshold           = 3
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -566,7 +578,7 @@ resource "aws_cloudwatch_metric_alarm" "secret_read" {
   metric_name         = "SecretReads"
   statistic           = "Sum"
   period              = 60
-  evaluation_periods  = 1
+  evaluation_periods  = 3
   datapoints_to_alarm = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -583,7 +595,7 @@ resource "aws_cloudwatch_metric_alarm" "iam_credential_change" {
   metric_name         = "IAMCredentialChanges"
   statistic           = "Sum"
   period              = 60
-  evaluation_periods  = 1
+  evaluation_periods  = 3
   datapoints_to_alarm = 1
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
