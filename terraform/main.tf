@@ -1,4 +1,17 @@
 # ==========================================
+# Provider
+# ==========================================
+#
+# El provider toma la region de variable "aws_region" y no de la
+# configuracion local de AWS: si alguien aplica el stack sin
+# AWS_DEFAULT_REGION exportado, falla con un error claro en vez de
+# desplegar en la region que sea.
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# ==========================================
 # Variables
 # ==========================================
 
