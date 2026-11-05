@@ -12,3 +12,39 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Terraform SIEMPRE en LF, y en todos los sistemas.
+#
+# POR QUE: los heredocs de Terraform (<<-EOT) conservan los finales de linea
+# del archivo tal cual. Un .tf con CRLF produce un query_string con "\r\n",
+# que NO es igual al que esta guardado en el estado (que se creo con LF), y
+# Terraform propone un cambio de "query_string" que no cambio nunca.
+#
+# Verificado el 2026-11-05: con un checkout en CRLF, `terraform plan`
+# mostraba 3 query definitions "a cambiar" que en realidad eran identicos.
+# El sintoma es desconcertante porque el archivo del repo se ve igual.
+#
+# `text eol=lf` ademas evita el problema de raiz: con `core.autocrlf=true`
+# (el default en Windows) un checkout sin esta regla trae los .tf con CRLF.
+#
+# EXCEPCION: terraform/main.tf se deja en CRLF a proposito.
+#
+# El `user_data` de la instancia esta desplegado con CRLF (son 33 lineas con
+# \r\n), y el estado de Terraform lo tiene asi. El provider de AWS compara
+# el user_data por HASH: si el valor cambia, hace un STOP/START de la
+# instancia para volver a aplicar el user_data.
+#
+# O sea: convertir main.tf a LF no es "normalizar el archivo", es un
+# cambio que reinicia la instancia de produccion. Se verificado el
+# 2026-11-05 con un `terraform plan` sobre una copia: con main.tf en LF el
+# plan propone `~ user_data` (y por lo tanto un stop/start).
+#
+# El user_data con CRLF funciona: cloud-init lo normaliza a LF antes de
+# ejecutarlo (verificado en /var/lib/cloud/instance/scripts/part-001 del
+# nodo), asi que el script corrio bien y el swapfile quedo creado.
+#
+# Cuando el user_data de la instancia se regenere con LF de forma
+# consciente, esta excepcion se puede borrar.
+terraform/*.tf text eol=lf
+terraform/main.tf text eol=crlf
+*.hcl text eol=lf
