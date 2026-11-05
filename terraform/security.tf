@@ -162,6 +162,24 @@ resource "aws_s3_bucket_ownership_controls" "audit" {
   }
 }
 
+# Versioning en el bucket de evidencia.
+#
+# El trail es evidencia de auditoria: si alguien borra un archivo por error
+# (o a proposito), con versioning queda la version anterior. La regla de
+# Config S3_BUCKET_VERSIONING_ENABLED lo exigia y estaba en NON_COMPLIANT.
+#
+# No es Object Lock (que exigiria crear el bucket con esa opcion y no se
+# puede agregar despues): el versioning protege del borrado accidental, que
+# es el riesgo real aca. El trail ya tiene enable_log_file_validation, asi
+# que ademas se puede verificar la integridad de cada version.
+resource "aws_s3_bucket_versioning" "audit" {
+  bucket = aws_s3_bucket.audit.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "audit" {
   bucket = aws_s3_bucket.audit.id
 
@@ -193,9 +211,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
     expiration {
       days = 365
     }
+
+    # Con versioning hay que limpiar las versiones no actuales: si no,
+    # cada version anterior del trail se queda para siempre. Mismo criterio
+    # que las actuales.
+    noncurrent_version_transition {
+      noncurrent_days = 30
+      storage_class   = "GLACIER"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 365
+    }
   }
 
-  depends_on = [aws_s3_bucket_server_side_encryption_configuration.audit]
+  depends_on = [
+    aws_s3_bucket_server_side_encryption_configuration.audit,
+    aws_s3_bucket_versioning.audit,
+  ]
 }
 
 data "aws_iam_policy_document" "audit_bucket" {
@@ -657,6 +690,36 @@ resource "aws_guardduty_detector" "this" {
   tags = {
     Name = "${var.project}-guardduty"
   }
+}
+
+# ==========================================
+# Password policy de la cuenta
+# ==========================================
+#
+# La regla de Config IAM_PASSWORD_POLICY la exige. Antes de esto la cuenta
+# no tenia ninguna, y el hallazgo era real: sin policy, un usuario IAM con
+# acceso a consola puede tener una password de 6 caracteres que nunca caduca
+# y se puede volver a usar.
+#
+# Los valores son los que la regla espera por default, con dos upgrades:
+# 14 caracteres en vez de 12, y 24 passwords de historia en vez de 0.
+#
+# El MFA del usuario NO se puede manejar aca: el seed TOTP es una credencial
+# y no puede vivir en un repositorio. El procedimiento esta en
+# docs/security.md.
+
+resource "aws_iam_account_password_policy" "this" {
+  minimum_password_length        = 14
+  require_numbers                = true
+  require_symbols                = true
+  require_uppercase_characters   = true
+  require_lowercase_characters   = true
+  allow_users_to_change_password = true
+  # expire_passwords no se configura: el provider lo deriva de
+  # max_password_age (con 90 dias, expira).
+  max_password_age               = 90
+  password_reuse_prevention      = 24
+  hard_expiry                    = false
 }
 
 # GuardDuty publica la metrica GuardDutyFindings en el namespace

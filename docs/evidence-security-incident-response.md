@@ -236,24 +236,31 @@ aws config get-compliance-details-by-config-rule --config-rule-name journal-api-
 | `journal-api-imdsv2-required` | COMPLIANT | i-0d3f04316b63ee928 |
 | `journal-api-no-public-ssh` | COMPLIANT | sg-03751b3f2c4b4948f |
 | `journal-api-iam-unused-credentials` | COMPLIANT | AIDAY3BYRUNRLFAU42BIA |
-| `journal-api-iam-password-policy` | **NON_COMPLIANT** | 607856468834 |
-| `journal-api-iam-user-mfa` | **NON_COMPLIANT** | AIDAY3BYRUNRLFAU42BIA |
-| `journal-api-guardduty-enabled` | SIN EVALUAR | (no hay detector) |
-| `journal-api-s3-bucket-versioning` | SIN EVALUAR | |
-| `journal-api-s3-public-access-block` | SIN EVALUAR | |
-| `journal-api-s3-tls-only` | SIN EVALUAR | |
+| `journal-api-iam-password-policy` | COMPLIANT | 607856468834 |
+| `journal-api-iam-user-mfa` | COMPLIANT | AIDAY3BYRUNRLFAU42BIA |
+| `journal-api-s3-bucket-versioning` | COMPLIANT | journal-api-audit-607856468834-us-east-1 |
+| `journal-api-s3-tls-only` | COMPLIANT | journal-api-audit-607856468834-us-east-1 |
+| `journal-api-s3-public-access-block` | COMPLIANT | (a nivel de cuenta) |
+| `journal-api-guardduty-enabled` | sin evaluar | no hay detector de GuardDuty (§6) |
 
-**Los dos hallazgos son reales**, no ruido:
+**12 de 13 reglas conformes.** La única que queda sin evaluar es la que
+comprueba que GuardDuty esté prendido, y GuardDuty está apagado a
+propósito (§6).
 
-- **La cuenta no tiene password policy.** Se verificó con
-  `aws iam get-account-password-policy` →
-  `NoSuchEntity: The Password Policy with domain name 607856468834 cannot be found`.
-- **El usuario `rodri-dev` no tiene MFA**, y es `AdministratorAccess`. Es
-  la credencial con más impacto de toda la cuenta.
+### Los 3 hallazgos que encontró, y cómo se cerraron
 
-Se comprobó que el hallazgo es **vivo** (no un estado viejo): se creó una
-password policy, la regla pasó a `COMPLIANT`, se borró, y la regla volvió a
-`NON_COMPLIANT`. El estado original de la cuenta quedó restaurado.
+La primera evaluación dio **3 hallazgos reales**, todos en `NON_COMPLIANT`:
+
+| Hallazgo | Por qué era real | Cómo se cerró |
+|---|---|---|
+| La cuenta sin password policy | `aws iam get-account-password-policy` → `NoSuchEntity` | Policy con 14 caracteres, símbolos, números, mayúsculas y minúsculas, caducidad a 90 días y 24 de historia. **Quedó en Terraform** (`aws_iam_account_password_policy`). |
+| `rodri-dev` sin MFA | El usuario administrador de la cuenta, sin MFA | MFA virtual (TOTP) habilitado. Procedimiento en [security.md §4.1](../security.md). El seed y el QR quedaron **fuera del repo**, en `~/.aws/`. |
+| Los buckets sin versioning | El de auditoría guarda la evidencia del trail | Versioning en los dos buckets, con lifecycle de versiones no actuales. |
+
+**El MFA no rompió nada:** `aws sts get-caller-identity` siguió funcionando
+después de habilitarlo. El MFA protege el acceso a consola, no las llamadas
+por API, y en esta cuenta el usuario nunca usó la consola (0 eventos
+`ConsoleLogin` en 90 días).
 
 ### El bug que encontró la captura de pantalla
 
@@ -386,6 +393,7 @@ mismo.
 | Evento de conformidad de AWS Config | AWS Config no lo publica en esta cuenta (verificado con captura directa) | La alerta se hace sobre el evento que sí llega; el estado de conformidad se consulta por API. |
 | Que las alarmas corran en el fork | El repositorio de origen tiene Actions deshabilitado y el fork lo hereda | El pipeline vive en `journal-starter-pipeline`; el fork tiene el mismo código y los mismos workflows. |
 | Migrar las alarmas del trail a EventBridge | No es un bloqueo: es que los metric filters ya están verificados end-to-end | Las reglas de EventBridge funcionan (verificado por captura directa); la migración queda como mejora pendiente. |
+| El MFA en Terraform | El seed TOTP es una credencial y no puede vivir en un repo | Procedimiento manual documentado en [security.md §4.1](../security.md); el seed quedó en `~/.aws/`. |
 
 ---
 

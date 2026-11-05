@@ -182,6 +182,17 @@ resource "aws_s3_bucket_public_access_block" "config" {
   restrict_public_buckets = true
 }
 
+# Versioning tambien aca: el historial de configuracion es evidencia de como
+# estaba la cuenta, y la regla S3_BUCKET_VERSIONING_ENABLED lo pide para
+# todos los buckets.
+resource "aws_s3_bucket_versioning" "config" {
+  bucket = aws_s3_bucket.config.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "config" {
   bucket = aws_s3_bucket.config.id
 
@@ -210,9 +221,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "config" {
     expiration {
       days = 365
     }
+
+    # Las versiones no actuales, con el mismo criterio.
+    noncurrent_version_transition {
+      noncurrent_days = 30
+      storage_class   = "GLACIER"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 365
+    }
   }
 
-  depends_on = [aws_s3_bucket_server_side_encryption_configuration.config]
+  depends_on = [
+    aws_s3_bucket_server_side_encryption_configuration.config,
+    aws_s3_bucket_versioning.config,
+  ]
 }
 
 data "aws_iam_policy_document" "config_bucket" {

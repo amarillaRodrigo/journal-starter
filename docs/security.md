@@ -469,20 +469,77 @@ aws config get-compliance-details-by-config-rule --config-rule-name journal-api-
 aws config get-compliance-summary-by-config-rule
 ```
 
-### Lo que encontró (verificado el 2026-11-05)
+### Lo que encontró (y lo que se cerró)
 
-| Regla | Estado | Detalle |
-|---|---|---|
-| `journal-api-iam-password-policy` | **NON_COMPLIANT** | La cuenta `607856468834` no tiene password policy para los usuarios IAM |
-| `journal-api-iam-user-mfa` | **NON_COMPLIANT** | El usuario `rodri-dev` no tiene MFA |
-| `journal-api-iam-unused-credentials` | COMPLIANT | Las dos llaves de `rodri-dev` no tienen `LastUsedDate`: nunca se usaron, así que no cuentan como "sin usar por más de 90 días" |
-| Las 7 reglas de conformidad | COMPLIANT | Certifican la postura de seguridad |
+El 2026-11-05 la primera evaluación encontró **3 hallazgos reales**, que
+estaban en `NON_COMPLIANT` porque eran verdad:
 
-Los dos hallazgos son reales y quedan como **riesgo aceptado y documentado**
-(§7): un usuario administrador sin MFA es el incidente de credenciales más
-probable de esta cuenta, y el mismo usuario es el que administra el
-proyecto. Arreglarlos requiere una tarjeta de identidad y una decisión sobre
-cómo se accede a la consola, que excede el alcance de un capstone.
+| Regla | Antes | Ahora | Qué se hizo |
+|---|---|---|---|
+| `journal-api-iam-password-policy` | NON_COMPLIANT | **COMPLIANT** | Password policy de la cuenta (14 caracteres, símbolos, números, mayúsculas y minúsculas, caduca a los 90 días, 24 de historia). Ahora está en Terraform: `aws_iam_account_password_policy`. |
+| `journal-api-iam-user-mfa` | NON_COMPLIANT | **COMPLIANT** | MFA virtual (TOTP) habilitado en `rodri-dev`. El procedimiento está abajo (§4.1). |
+| `journal-api-s3-bucket-versioning` | NON_COMPLIANT | **COMPLIANT** | Versioning en los dos buckets (el de auditoría y el de Config), con lifecycle de versiones no actuales para que no acumulen. |
+
+Las 13 reglas quedan así:
+
+| Regla | Estado |
+|---|---|
+| `journal-api-cloud-trail-encryption` | COMPLIANT |
+| `journal-api-cloud-trail-log-file-validation` | COMPLIANT |
+| `journal-api-cloud-trail-to-cloudwatch-logs` | COMPLIANT |
+| `journal-api-ebs-encrypted` | COMPLIANT |
+| `journal-api-iam-password-policy` | COMPLIANT |
+| `journal-api-iam-unused-credentials` | COMPLIANT |
+| `journal-api-iam-user-mfa` | COMPLIANT |
+| `journal-api-imdsv2-required` | COMPLIANT |
+| `journal-api-no-public-ssh` | COMPLIANT |
+| `journal-api-s3-bucket-versioning` | COMPLIANT |
+| `journal-api-s3-tls-only` | COMPLIANT |
+| `journal-api-s3-public-access-block` | COMPLIANT |
+| `journal-api-guardduty-enabled` | **sin evaluar**: no hay detector de GuardDuty (§7) |
+
+### 4.1 El MFA de `rodri-dev`, paso a paso
+
+El MFA **no se puede tener en Terraform**: el seed TOTP es una credencial y
+no puede vivir en un repositorio. Queda como procedimiento manual, y por
+eso está escrito acá.
+
+```bash
+# 1. Crear el dispositivo virtual (devuelve el QR y el seed, UNA sola vez)
+aws iam create-virtual-mfa-device --virtual-mfa-device-name journal-api-rodri-dev
+
+# 2. Habilitarlo con dos códigos TOTP consecutivos
+aws iam enable-mfa-device \
+  --user-name rodri-dev \
+  --serial-number arn:aws:iam::607856468834:mfa/journal-api-rodri-dev \
+  --authentication-code-1 <codigo actual> \
+  --authentication-code-2 <codigo siguiente>
+
+# 3. Verificar
+aws iam list-mfa-devices --user-name rodri-dev
+```
+
+> **El `QRCodePNG` que devuelve la API son bytes PNG crudos, no base64.**
+> Decodificarlo como base64 da un archivo corrupto. Para el seed, en
+> cambio, hay que tener en cuenta que el API lo devuelve como `bytes`
+> también: `seed.decode()` antes de usarlo.
+
+El seed y el QR quedaron **fuera del repo**, en
+`~/.aws/mfa-rodri-dev-seed.txt` y `~/.aws/mfa-rodri-dev-qr.png`, con
+permisos restringidos al usuario. El seed es una credencial: hay que
+moverlo a un gestor de contraseñas y borrar el archivo.
+
+**Qué protege y qué no.** El MFA protege el **acceso a la consola**: sin el
+código TOTP no se entra. **No protege las llamadas por API**: las access
+keys de `rodri-dev` siguen funcionando sin MFA (verificado después de
+habilitarlo), porque MFA es una condición de sesión de consola, no un
+requisito de las firmas de API. Para proteger las API hay que agregar
+`aws:MultiFactorAuthPresent` a las policies o usar roles con
+`ExternalId`, como hace el pipeline.
+
+En esta cuenta el MFA además es barato: `rodri-dev` **nunca usó la consola**
+(hay 0 eventos `ConsoleLogin` en 90 días), o sea que activarlo no cambió
+nada de cómo se trabaja, solo cerró el hallazgo.
 
 ---
 
@@ -686,15 +743,15 @@ hoy. La alerta real va por `journal-api-config-changes`, que matchea el
 evento de cambio de configuración de un recurso relevante. El estado de
 conformidad se consulta por API o en la consola.
 
-### Los dos hallazgos de Config no están resueltos
+### El MFA de `rodri-dev` no se puede manejar con IaC
 
-`journal-api-iam-user-mfa` y `journal-api-iam-password-policy` están en
-`NON_COMPLIANT` y lo van a seguir estando: arreglarlos requiere MFA para el
-usuario administrador y una password policy en la cuenta, dos decisiones que
-no son de un capstone. Como las reglas de amenaza notifican por SNS, esto
-significa que **cada vez que la cuenta cambie y una de estas reglas vuelva
-a evaluarse, puede llegar un correo**. Es el comportamiento esperado: el
-detalle está en la consola de Config.
+El dispositivo MFA virtual requiere un seed TOTP, que es una credencial: no
+puede estar en un repositorio. Queda como procedimiento manual documentado
+en §4.1, con el seed y el QR guardados fuera del repo.
+
+Lo que sí quedó en Terraform: la password policy de la cuenta
+(`aws_iam_account_password_policy`), que es lo que cierra la regla
+`IAM_PASSWORD_POLICY`.
 
 ### El `destroy` del bucket de auditoría
 
@@ -789,7 +846,7 @@ correo que el resto de las alarmas.
 |---|---|
 | Habilitar audit logging (CloudTrail) | ✅ `terraform/security.tf` |
 | Alerta por evento crítico de seguridad | ✅ 4 alarmas sobre el trail + las de Config |
-| Habilitar detección de amenazas | ✅ AWS Config (13 reglas, 2 hallazgos reales) — GuardDuty: IaC lista pero bloqueada por la cuenta (§7) |
+| Habilitar detección de amenazas | ✅ AWS Config: 13 reglas, **12 conformes** y los 3 hallazgos reales cerrados (§4) — GuardDuty: IaC lista pero bloqueada por la cuenta (§7) |
 | GitHub Security Scanning (CodeQL) | ✅ `.github/workflows/codeql.yml`, run verde en `main` |
 | Runbook de respuesta a incidentes | ✅ [incident-response.md](incident-response.md) |
 
