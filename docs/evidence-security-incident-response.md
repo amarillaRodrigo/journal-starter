@@ -17,6 +17,144 @@ salió**. Los comandos son copiables.
 | GitHub Security Scanning (CodeQL) | ✅ | [§4](#4-codeql) |
 | Runbook de respuesta a incidentes | ✅ | [§5](#5-runbook-de-respuesta-a-incidentes) |
 
+Los nueve ítems del checklist de seguridad del capstone, con su evidencia, en
+[security.md §9.2](security.md#92-checklist-de-seguridad-del-capstone).
+
+---
+
+## 0. Verificaciones del 2026-11-05 (cierre del checklist)
+
+Estas son las comprobaciones del último pase: HSTS, retención del log de
+auditoría, aislamiento de la base de datos y el arreglo del mecanismo de
+deploy que hizo falta para que el HSTS llegara a la respuesta.
+
+### 0.1 HSTS presente en la respuesta pública
+
+```bash
+curl -sS -D- -o NUL https://3.215.52.10.sslip.io/entries
+```
+
+Salida real:
+
+```
+HTTP/1.1 200 OK
+Alt-Svc: h3=":443"; ma=2592000
+Content-Length: 1583
+Content-Type: application/json
+Date: Thu, 05 Nov 2026 22:49:13 GMT
+Server: uvicorn
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+Via: 1.1 Caddy
+```
+
+Y el redirect de HTTP a HTTPS:
+
+```bash
+curl -sS -D- -o NUL http://3.215.52.10.sslip.io/entries
+```
+
+```
+HTTP/1.1 308 Permanent Redirect
+Location: https://3.215.52.10.sslip.io/entries
+```
+
+> **Este header no apareció en el primer intento**, y el motivo es el hallazgo
+> más importante del proyecto: un `kubectl apply` del ConfigMap **no** hace que
+> Caddy lo relea. La causa raíz, el experimento que la demuestra y el arreglo
+> (un checksum en el pod template) están en
+> [security.md §7](security.md#un-cambio-en-el-configmap-de-caddy-no-llega-al-proceso-que-lo-lee)
+> y en [retrospective.md §4.1](retrospective.md#41-caddy-no-recarga-un-configmap-el-cambio-se-pierde-en-silencio).
+>
+> La verificación de que el arreglo funciona, en la instancia:
+
+```
+=== caddy pod (nuevo, 76 s) ===
+caddy-6447fbdf57-whgzf   1/1   Running   0   76s
+
+=== anotación del checksum ===
+f21ddd1df2023b69242aa8cff7463f6cc10ba187c861380388dc8973722317b0
+
+=== Caddyfile montado en el pod ===
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+```
+
+El pod **cambió** (rollout) y el ConfigMap montado es el nuevo: eso es
+precisamente lo que antes no pasaba.
+
+### 0.2 Retención del log de auditoría en 90 días
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix "aws-cloudtrail-logs-journal-api" \
+  --query 'logGroups[0].{Days:retentionInDays,Bytes:storedBytes,Filters:metricFilterCount}' --output json
+```
+
+```json
+{
+  "Days": 90,
+  "Bytes": 10511286,
+  "Filters": 13
+}
+```
+
+Los **13 metric filters** sobreviven al cambio de retención (que se aplicó
+in-place, sin recrear el log group).
+
+El costo, con los precios de listado de AWS (us-east-1) y el uso real de la
+cuenta:
+
+| Concepto | Precio | Uso real | Costo |
+|---|---|---|---|
+| Ingesta de logs | $0,50/GB | 0,073 GB (pronóstico 0,546 GB) | $0 — dentro de los 5 GB always free |
+| Almacenamiento | $0,03/GB-mes | 0,011 GB-Mo (pronóstico 0,081 GB-Mo) | $0 — dentro de los 5 GB-Mo always free |
+
+El delta de 30 a 90 días son ~20 MB extra guardados: **menos de un centavo al
+mes**. El detalle del cálculo está en [security.md §8](security.md#el-costo-de-subir-la-retención-del-log-de-auditoría-a-90-días).
+
+### 0.3 El puerto de la base de datos sigue bloqueado desde afuera
+
+```powershell
+Test-NetConnection -ComputerName 3.215.52.10 -Port 5432 -WarningAction SilentlyContinue
+```
+
+```
+TcpTestSucceeded: False
+```
+
+Y el security group, que es donde se corta el tráfico:
+
+```bash
+aws ec2 describe-security-groups --filters "Name=group-name,Values=journal-sg" \
+  --query 'SecurityGroups[0].IpPermissions[].FromPort' --output json
+```
+
+```json
+[80, 443]
+```
+
+Solo 80 y 443. **No hay 5432.** La desviación del ítem "subnet privada" y su
+análisis completo están en [network-isolation.md](network-isolation.md).
+
+### 0.4 El pipeline, verde y desplegando este commit
+
+| Run | Commit | `test` | `build` | `deploy` |
+|---|---|---|---|---|
+| [42124188335](https://github.com/amarillaRodrigo/journal-starter-pipeline/actions/runs/42124188335) | `dd178de` | ✅ | ✅ | ✅ |
+| [42124190057](https://github.com/amarillaRodrigo/journal-starter-pipeline/actions/runs/42124190057) (CodeQL) | `dd178de` | ✅ | — | — |
+
+El job `deploy` incluye el paso **"Verify the security properties on the
+instance"** (`scripts/verify-security.sh`), que corre dentro de la instancia y
+comprueba 11 invariantes de seguridad; su exit code decide si el job pasa.
+
+Y el endpoint sirve ese commit:
+
+```bash
+curl -sS https://3.215.52.10.sslip.io/version
+```
+
+```json
+{"commit":"dd178de6927a2c08ce5c63ee35c48d765314495a"}
+```
+
 ---
 
 ## 1. Audit logging (CloudTrail)
