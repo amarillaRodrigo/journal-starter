@@ -92,8 +92,33 @@ echo "==> Postgres, Service y Caddy"
 PUBLIC_IP="$(public_ip)"
 ACME_EMAIL="$(param /journal-api/ACME_EMAIL)"
 echo "  IP publica: ${PUBLIC_IP}"
+
+# El Caddyfile se renderiza primero a un archivo aparte: el checksum va en
+# una anotacion del pod template, asi que hace falta el contenido final.
+#
+# POR QUE EL CHECKSUM: un `kubectl apply` del ConfigMap NO alcanza para que
+# Caddy use la configuracion nueva. Kubernetes proyecta el ConfigMap en el
+# volumen del pod (el archivo en disco cambia a los ~50 s), pero Caddy no lo
+# vuelve a leer: su watcher sigue el inodo del archivo y el kubelet lo cambia
+# de forma atomica (swap del symlink ..data), asi que no se dispara. Con
+# `admin off` tampoco hay admin API para recargar.
+#
+# Verificado el 2026-11-05 con un pod de prueba: con el ConfigMap cambiado a
+# "v2", el archivo en disco era v2 y la respuesta seguia siendo v1 (con y sin
+# `admin off`). O sea: el cambio de configuracion se perdia en silencio.
+#
+# Con el checksum en el pod template, el cambio del Caddyfile cambia el
+# template, Kubernetes hace el rollout y el pod nuevo arranca con el
+# ConfigMap nuevo. El rollout es barato: Caddy es stateless salvo el PVC de
+# certificados (que sobrevive al Recreate).
 sed -e "s|__PUBLIC_IP__|${PUBLIC_IP}|g" -e "s|__ACME_EMAIL__|${ACME_EMAIL}|g" \
-  k8s/caddy.yaml | kubectl apply -f -
+  k8s/caddy.yaml > /tmp/caddy.yaml.rendered
+
+CADDY_CHECKSUM="$(sha256sum /tmp/caddy.yaml.rendered | cut -d' ' -f1)"
+echo "  checksum del Caddyfile: ${CADDY_CHECKSUM}"
+
+sed -e "s|__CADDY_CHECKSUM__|${CADDY_CHECKSUM}|g" \
+  /tmp/caddy.yaml.rendered | kubectl apply -f -
 # El init container de Postgres usa la imagen de la app, asi que tambien hay
 # que sustituirle el tag del commit.
 sed "s|journal-api:placeholder|journal-api:${TAG}|g" k8s/postgresql.yaml | kubectl apply -f -

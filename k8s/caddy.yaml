@@ -18,6 +18,25 @@ data:
     # destroy/apply, y el email de ACME no se quiere en el repo.
     __PUBLIC_IP__.sslip.io {
         encode zstd gzip
+
+        # HSTS (RFC 6797): el navegador queda obligado a hablar HTTPS con
+        # este host durante un año, aunque el usuario escriba la URL en
+        # claro. Sin esto, un atacante que controle la red puede responder
+        # por HTTP y el navegador lo acepta: el TLS deja de ser el ancla.
+        #
+        # includeSubDomains extiende la politica a los subdominios del host.
+        # En este proyecto no hay subdominios propios, pero sslip.io
+        # resuelve cualquier etiqueta delante del IP al mismo servidor, asi
+        # que la politica los cubre a todos.
+        #
+        # NO se agrega `preload`: la lista de preload de los navegadores
+        # exige controlar el dominio registrable, y el host real
+        # (3.215.52.10.sslip.io) no es de este proyecto. Anunciarlo sin
+        # estar en la lista no aporta nada.
+        header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        }
+
         reverse_proxy journal-api-service:8000
     }
 ---
@@ -51,6 +70,23 @@ spec:
     metadata:
       labels:
         app: caddy
+      annotations:
+        # Checksum del manifiesto renderizado de Caddy. Lo calcula
+        # scripts/deploy-k8s.sh en cada deploy.
+        #
+        # POR QUE HACE FALTA: Kubernetes SI actualiza el ConfigMap en el
+        # volumen del pod (verificado el 2026-11-05: el archivo en disco
+        # cambia a los ~50 s), pero Caddy NO vuelve a leerlo. El watcher de
+        # Caddy sigue el inodo del archivo y el kubelet lo cambia de forma
+        # atomica (swap del symlink ..data), asi que el watcher no se
+        # dispara; y con `admin off` tampoco hay admin API para recargar.
+        # Sin este checksum, `kubectl apply` actualiza el ConfigMap y el pod
+        # sigue sirviendo la configuracion VIEJA, en silencio.
+        #
+        # El checksum va en el pod template: al cambiar, el template cambia y
+        # Kubernetes hace el rollout del pod, que ya arranca con el
+        # ConfigMap nuevo.
+        caddyfile-checksum: "__CADDY_CHECKSUM__"
     spec:
       containers:
         - name: caddy
