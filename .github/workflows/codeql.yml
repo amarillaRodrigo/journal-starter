@@ -1,0 +1,68 @@
+# Analisis estatico de seguridad (CodeQL) sobre el codigo Python.
+#
+# Esto es el "advanced setup" de GitHub code scanning: el workflow corre
+# CodeQL en cada push y PR y publica los resultados en la pestana
+# Security > Code scanning. No es lo mismo que un linter (ruff): ruff ve
+# estilo y errores, CodeQL ve flujos de datos inseguros (una consulta que
+# llega a una consulta SQL sin parametrizar, un comando con shell=True,
+# un eval sobre dato externo).
+#
+# En un repositorio publico el code scanning no cuesta nada. En uno
+# privado hace falta GitHub Advanced Security (de pago).
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Barrido semanal: el analisis se hace con el estado del codigo de ese
+  # dia, no solo con los ultimos commits.
+  schedule:
+    - cron: "27 5 * * 0"
+  workflow_dispatch:
+
+# Permiso por defecto del workflow: solo lectura del codigo. El job de
+# analisis necesita escribir en security-events (eso es lo que publica
+# los resultados en la pestana Security).
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          language: ${{ matrix.language }}
+          # Por defecto corre el conjunto "security-and-quality". Con
+          # "security-extended" finds mas casos y tambien mas ruido.
+          # queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

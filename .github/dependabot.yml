@@ -1,0 +1,35 @@
+# Dependabot mantiene las dependencias al dia.
+#
+# Dos ecosystems, y el segundo tiene una trampa:
+#
+#   - github-actions: las actions de los workflows (checkout, codeql-action,
+#     aws-actions, docker, setup-uv). Una action desactualizada es una action
+#     con un CVE sin parchear, y el pipeline corre con permisos de
+#     id-token: write.
+#
+#   - uv: el proyecto resuelve con uv y el CI corre "uv sync --locked". Si
+#     Dependabot actualizara solo pyproject.toml, el lock quedaria
+#     desactualizado y el CI fallaria con "the lockfile is not up to date".
+#     El ecosystem correcto es "uv", que actualiza uv.lock y pyproject.toml
+#     juntos.
+#
+# El Dockerfile no se actualiza solo: sus imagenes base cambian por digest y
+# un bump sin probar el deploy es peor que el riesgo que cubre.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
