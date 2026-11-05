@@ -326,7 +326,18 @@ resource "aws_s3_bucket_policy" "audit" {
 variable "audit_log_retention_days" {
   description = "Retencion de la copia consultable del trail en CloudWatch Logs. El archivo durable vive en S3."
   type        = number
-  default     = 30
+
+  # 90 dias, no 30: es lo que pide el checklist de auditoria (>= 90 dias de
+  # retencion del log de auditoria) y es lo que da tiempo real para investigar:
+  # con 30 dias, un incidente que se detecta tarde ya no tiene logs.
+  #
+  # El costo es despreciable y NO depende de la retencion: se paga por lo
+  # que se ingiere y por lo que se guarda. Medido el 2026-11-05 con el log
+  # group en ~10 MB, el delta de guardar 90 dias en vez de 30 es de centavos
+  # al mes (CloudWatch Logs cobra ~$0.03/GB-mes de almacenamiento). Lo que
+  # cuesta dinero es el TRAIL COMPLETO de la cuenta, que va growing en
+  # volumen, no en retencion.
+  default = 90
 }
 
 resource "aws_cloudwatch_log_group" "audit" {
