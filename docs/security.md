@@ -495,8 +495,13 @@ Las 13 reglas quedan así:
 | `journal-api-no-public-ssh` | COMPLIANT |
 | `journal-api-s3-bucket-versioning` | COMPLIANT |
 | `journal-api-s3-tls-only` | COMPLIANT |
-| `journal-api-s3-public-access-block` | COMPLIANT |
+| `journal-api-s3-public-access-block` | **sin evaluar**: es una regla a nivel de cuenta y el recorder no registra el config item de la cuenta, así que no hay nada que evaluar |
 | `journal-api-guardduty-enabled` | **sin evaluar**: no hay detector de GuardDuty (§7) |
+
+**11 conformes, 2 sin evaluar.** Las dos que no evalúan tienen la misma
+causa: no hay un recurso que las pueda marcar. El control equivalente al
+segundo caso (que ningún bucket sea público) sí está: los dos buckets
+tienen `aws_s3_bucket_public_access_block` con las cuatro protecciones.
 
 ### 4.1 El MFA de `rodri-dev`, paso a paso
 

@@ -240,12 +240,15 @@ aws config get-compliance-details-by-config-rule --config-rule-name journal-api-
 | `journal-api-iam-user-mfa` | COMPLIANT | AIDAY3BYRUNRLFAU42BIA |
 | `journal-api-s3-bucket-versioning` | COMPLIANT | journal-api-audit-607856468834-us-east-1 |
 | `journal-api-s3-tls-only` | COMPLIANT | journal-api-audit-607856468834-us-east-1 |
-| `journal-api-s3-public-access-block` | COMPLIANT | (a nivel de cuenta) |
+| `journal-api-s3-public-access-block` | sin evaluar | regla a nivel de cuenta: el recorder no registra ese config item |
 | `journal-api-guardduty-enabled` | sin evaluar | no hay detector de GuardDuty (§6) |
 
-**12 de 13 reglas conformes.** La única que queda sin evaluar es la que
-comprueba que GuardDuty esté prendido, y GuardDuty está apagado a
-propósito (§6).
+**11 de 13 reglas conformes.** Las dos que no evalúan no tienen un recurso
+que las pueda marcar: una depende de un detector de GuardDuty que está
+apagado a propósito, y la otra es a nivel de cuenta (el recorder no
+registra el config item de la cuenta). El control equivalente al segundo
+caso sí está: los dos buckets tienen `aws_s3_bucket_public_access_block`
+con las cuatro protecciones.
 
 ### Los 3 hallazgos que encontró, y cómo se cerraron
 
