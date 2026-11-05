@@ -147,6 +147,45 @@ arn:aws:sns:us-east-1:607856468834:journal-api-alarms:924de5ef-...  email  amari
 
 Una sola suscripción, confirmada. **Un canal, un correo.**
 
+### Lo que encontró la verificación: las métricas no se publican
+
+Al intentar confirmar las notificaciones por SNS, las métricas del topic
+salieron siempre vacías:
+
+```bash
+aws cloudwatch get-metric-statistics --namespace AWS/SNS \
+  --metric-name NumberOfNotificationsSent --dimensions Name=TopicName,Value=journal-api-alarms ...
+# sin datapoints, incluso después de dos publicaciones manuales
+```
+
+Y lo mismo con EventBridge:
+
+```bash
+aws cloudwatch get-metric-statistics --namespace AWS/EventBridge \
+  --metric-name TriggeredRules --dimensions Name=RuleName,Value=journal-api-eb-probe-ec2 ...
+# 0, con una regla que SÍ estaba matcheando
+```
+
+Para verificar de verdad se capturó el evento, con un sink descartable
+(regla de EventBridge → topic SNS temporal → cola SQS → leer los mensajes):
+
+| Prueba | Resultado |
+|---|---|
+| Regla catch-all `{"source": [{"prefix": "aws."}]}` | **106 eventos en 5 minutos**: 101 `AWS API Call via CloudTrail` + 4 `Config Configuration Item Change` |
+| Regla `{"source": ["aws.ec2"], "detail-type": ["AWS API Call via CloudTrail"]}` + un `AuthorizeSecurityGroupIngress` real | **llegó en menos de 15 segundos**, con `eventName` y `userIdentity` intactos |
+
+**Conclusión: CloudTrail SÍ entrega a EventBridge en esta cuenta.** El
+diagnóstico anterior ("no entrega") era un falso negativo de métrica: la
+regla matcheaba desde el principio y lo que no aparecía era el contador.
+
+Esto también explica por qué las alarmas del trail están hechas con metric
+filters y no con reglas de EventBridge: se llegaron a descartar EventBridge
+por esa misma métrica que no se publica. Migrarlas es la mejora
+pendiente, no un bloqueo.
+
+> **Regla práctica para esta cuenta:** no verifiques nada con
+> `get-metric-statistics` de EventBridge ni de SNS. Capturá el evento.
+
 ---
 
 ## 3. Detección de threats (AWS Config)
@@ -319,8 +358,9 @@ mismo.
 | Ítem | Por qué | Qué quedó |
 |---|---|---|
 | GuardDuty | `SubscriptionRequiredException`: la cuenta no tiene método de pago | IaC lista y probada en `terraform/security.tf` detrás de `enable_guardduty`; la alarma existe. Se activa con una tarjeta + `true` + `apply`. |
-| Evento de conformidad de AWS Config | AWS Config no lo publica en esta cuenta (verificado) | La alerta se hace sobre el evento que sí llega; el estado de conformidad se consulta por API. |
+| Evento de conformidad de AWS Config | AWS Config no lo publica en esta cuenta (verificado con captura directa) | La alerta se hace sobre el evento que sí llega; el estado de conformidad se consulta por API. |
 | Que las alarmas corran en el fork | El repositorio de origen tiene Actions deshabilitado y el fork lo hereda | El pipeline vive en `journal-starter-pipeline`; el fork tiene el mismo código y los mismos workflows. |
+| Migrar las alarmas del trail a EventBridge | No es un bloqueo: es que los metric filters ya están verificados end-to-end | Las reglas de EventBridge funcionan (verificado por captura directa); la migración queda como mejora pendiente. |
 
 ---
 

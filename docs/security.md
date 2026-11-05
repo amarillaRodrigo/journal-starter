@@ -126,26 +126,40 @@ reglas de EventBridge sobre `detail.eventName`, las métricas
 (`TriggeredRules`, `Invocations`) nunca aparecieron, y con la alarma de
 security group yendo a `ALARM` tampoco se notificó nada.
 
-**Esa limitación NO se reproduce.** El 2026-11-05 se puso una regla
-catch-all sobre el bus default (`{"source": [{"prefix": "aws."}]}`)
-apuntando a un topic de prueba, y en 5 minutos se capturaron **106
-eventos**, de los cuales **101 eran `AWS API Call via CloudTrail`**
-(`source: aws.sts`, `aws.ec2`, ...) y 4 eran
-`Config Configuration Item Change`. O sea: **CloudTrail sí entrega a
-EventBridge en esta cuenta.**
+**La conclusión estaba equivocada: CloudTrail SÍ entrega a EventBridge en
+esta cuenta.** El 2026-11-05 se verificó capturando los eventos de verdad
+(una regla → un topic SNS temporal → una cola SQS → leer los mensajes), no
+con las métricas:
 
-Los avisos del trail siguen siendo metric filters, por dos razones
-prácticas: ya están verificados end-to-end (la alarma de security group se
-disparó y el trail tiene los eventos), y los metric filters se pueden
-anclar al `eventSource` para que no se auto-alimenten. Migrar a
-EventBridge sería rehacer algo que funciona, y queda documentado como
-mejora posible, no como bloqueo.
+| Prueba | Resultado |
+|---|---|
+| Regla catch-all `{"source": [{"prefix": "aws."}]}` | **106 eventos en 5 minutos**: 101 `AWS API Call via CloudTrail` (`aws.sts`, `aws.ec2`, ...) y 4 `Config Configuration Item Change` |
+| Regla `{"source": ["aws.ec2"], "detail-type": ["AWS API Call via CloudTrail"]}` + un `AuthorizeSecurityGroupIngress` real | **el evento llegó en menos de 15 segundos**, con su `eventName` y su `userIdentity` intactos |
 
-> La diferencia real con los metric filters: el patrón de EventBridge
-> matchea por campo y por lo tanto no tiene el problema de auto-alimentación
-> que tienen los filtros de texto. Los 13 filtros de texto existen
-> justamente porque la API de CloudWatch Logs de esta cuenta no acepta
-> patrones JSON ni regex (§2).
+**Lo que no funciona en esta cuenta son las MÉTRICAS**, no la entrega:
+
+- `AWS/EventBridge TriggeredRules` no se publica para reglas que
+  demonstradamente matchean (la sonda de EC2 dio 0 mientras el evento
+  llegaba).
+- `AWS/SNS Publishes` y `NumberOfNotificationsSent` tampoco: siguen
+  vacíos después de publicaciones manuales.
+
+Por eso el diagnóstico original ("CloudTrail no le entrega sus eventos a
+EventBridge") era un **falso negativo de métrica**: la regla matcheaba
+desde el principio y lo que no aparecía era el contador.
+
+**Regla para verificar cualquier cosa en esta cuenta: no confíes en las
+métricas, capturá el evento.** Por eso las pruebas de este documento
+muestran la salida real de los comandos.
+
+Los avisos del trail siguen siendo metric filters: ya están verificados
+end-to-end (la alarma de security group se disparó y el trail tiene los
+eventos) y los metric filters se pueden anclar al `eventSource` para que no
+se auto-alimenten. **Migrarlos a EventBridge es la mejora pendiente**: el
+patrón de EventBridge matchea por campo y por lo tanto no tiene el
+problema de auto-alimentación que tienen los filtros de texto (que existen
+justamente porque la API de CloudWatch Logs de esta cuenta no acepta
+patrones JSON ni regex, §2).
 
 > **Ojo, esto NO aplica a AWS Config.** Los eventos de Config sí llegan a
 > EventBridge: es otro servicio, con otro camino. La cadena
@@ -224,11 +238,13 @@ SQS y desuscribiendo: responde OK.
 **El statement de los servicios no tiene condición, a propósito.** La
 primera versión acotaba cada servicio por `aws:SourceArn` (la alarma para
 CloudWatch, la regla de EventBridge para EventBridge). Con la condición no
-apareció ninguna publicación en el topic: ni las de las alarmas que sí
-pasaron por `ALARM`, ni dos publicaciones manuales de control. Sin
-condición, el comportamiento es el mismo que el de la policy por defecto
-del topic (que no tiene condición y con la que las alarmas se vinieron
-disparando desde el 2026-10-23).
+se pudo confirmar ninguna publicación en el topic: ni las de las alarmas
+que sí pasaron por `ALARM`, ni dos publicaciones manuales de control. Como
+las métricas de SNS en esta cuenta no se publican (§7), la ausencia de
+prueba no es prueba de ausencia: por eso la condición se sacó y se dejó
+el comportamiento igual al de la policy por defecto del topic (que no tiene
+condición y con la que las alarmas se vinieron disparando desde el
+2026-10-23).
 
 El costo de dejarlo abierto es que cualquier alarma de la cuenta puede
 publicar en **este** topic, que es del proyecto y tiene una sola
@@ -575,13 +591,24 @@ publicó la métrica para ese minuto poco después. La alarma no es un
 detector en tiempo real: es un detector con algunos minutos de retraso. Por
 eso las alarmas evalúan 3 periodos y no 1 (§3).
 
-### CloudTrail no entrega eventos a EventBridge en esta cuenta
+### Las métricas de EventBridge y de SNS no se publican en esta cuenta
 
-Ver §2. Las reglas de EventBridge no matchean nada, así que la alerta se
-resuelve con metric filters. Si en el futuro la entrega funciona, la
-migración es reemplazar los filtros por reglas de EventBridge con patrón
-JSON (que ya se verificaron con `TestEventPattern`). Los eventos de **AWS
-Config** sí llegan a EventBridge: es otro servicio (§4).
+`AWS/EventBridge TriggeredRules` y `AWS/SNS Publishes` /
+`NumberOfNotificationsSent` no aparecen, ni siquiera para eventos que se
+verificó que llegan (ver §2). Consecuencia práctica: **una alarma que sí
+dispara, o una publicación que sí ocurre, pueden parecer que no
+ocurrieron** si el verificador es una métrica.
+
+Por eso las verificaciones de este documento capturan los eventos de verdad
+(regla → topic → cola SQS → leer) en vez de mirar contadores.
+
+### La limitación de EventBridge que se había anotado, corregida
+
+Estaba anotado que "CloudTrail no entrega eventos a EventBridge en esta
+cuenta". **Es falso**, y el error fue usar una métrica como verificador
+(§2): los eventos llegan, incluso los regionales, en menos de 15 segundos.
+Los avisos del trail siguen con metric filters porque ya están verificados
+end-to-end, pero migrarlos a EventBridge es la mejora pendiente.
 
 ### Los patrones son de texto, no de campo
 
