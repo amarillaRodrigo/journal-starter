@@ -616,16 +616,20 @@ Macie o Detective: los cinco responden lo mismo). La causa habitual es que
 la cuenta **no tiene método de pago activo** (todos esos servicios tienen
 componente de consumo).
 
-**Para habilitarlo:**
+**Es una decisión, no una tarea pendiente.** El proyecto se mantiene
+dentro del free tier y **no se va a agregar una tarjeta**: el threat
+detection es AWS Config (§4), que es free tier y no requiere suscripción.
+GuardDuty además nunca fue gratis (después de los 30 días de prueba cobra
+$4 por millón de eventos), o sea que activarlo requeriría tarjeta **y**
+un gasto recurrente.
 
-1. Cargar un método de pago en la consola (Billing → Payment preferences).
-2. Poner `enable_guardduty = true` en `terraform/terraform.tfvars`.
-3. `terraform -chdir=terraform apply`.
-
-La IaC ya está escrita y probada (`aws_guardduty_detector.this`), con
-`count` para que el stack no falle mientras tanto. La alarma
-`journal-api-security-guardduty-findings` ya existe y queda en `OK` (nunca
-hay métricas) hasta que el detector esté activo.
+La IaC de GuardDuty queda escrita y probada
+(`aws_guardduty_detector.this`, detrás del flag `enable_guardduty`) para
+que, si algún día esta cuenta cambia de política, no haya que escribir
+nada. La alarma `journal-api-security-guardduty-findings` existe y queda
+en `OK` (nunca hay métricas) hasta que el detector esté activo. Ocupa 1 de
+las 10 alarmas que el free tier cubre, y vale la pena: si algún día se
+activa, el aviso ya está cableado.
 
 **Mientras tanto, AWS Config hace de threat detection** (§4).
 
@@ -702,18 +706,80 @@ el bucket primero.
 
 ## 8. Costos
 
+**La postura del proyecto es free tier, sin tarjeta de crédito.** La
+cuenta no tiene método de pago, así que no hay forma de que AWS cobre
+algo: no es una promesa, es la ausencia de un mecanismo de cobro.
+
+Medido el 2026-11-05 con `aws ce get-cost-and-usage` (mes en curso):
+
+| Servicio | Costo del mes |
+|---|---|
+| AWS CloudTrail | $0 |
+| AmazonCloudWatch | $0 |
+| Amazon Simple Notification Service | $0 |
+| Amazon Simple Storage Service | $0 |
+| AWS Key Management Service | $0 |
+| AWS X-Ray | $0 |
+| Amazon EC2 (compute + ECR + VPC) | $0 |
+| AWS Glue | $0 |
+| AWS Secrets Manager | $0 |
+| **Total** | **$0,00** |
+
+Y el uso del free tier (`aws freetier get-free-tier-usage`): los nueve
+usos del proyecto son **"Always Free"** (gratis permanente, no una
+promoción de 6 meses), y el pronóstico de fin de mes está bajo cada límite.
+
+| Uso | Límite | Ahora | Fin de mes | Tipo |
+|---|---|---|---|---|
+| CloudWatch alarmas | 10 | 0,87 | 6,49 | Always Free |
+| CloudWatch métricas | 10 | 0,96 | 7,17 | Always Free |
+| CloudWatch dashboards | 3 | 0,12 | 0,93 | Always Free |
+| CloudWatch logs (storage) | 5 GB | 0,01 | 0,08 | Always Free |
+| CloudWatch PutLogEvents | 5 | 0,07 | 0,55 | Always Free |
+| X-Ray trazas almacenadas | 100.000 | 968 | 5.808 | Always Free |
+| KMS requests | 20.000 | 1 | 6 | Always Free |
+| SNS requests | 1.000.000 | 5 | 37,5 | Always Free |
+| Glue Catalog-Request | 1.000.000 | 18 | 108 | Always Free |
+
+Los dos que se acercan al límite son las **7 alarmas** y las **métricas
+propias** (4 de `JournalSecurity` + las de la aplicación). Si el proyecto
+creciera, el margen es ahí.
+
+AWS Config no aparece en la tabla porque su uso (13 reglas sobre ~30
+recursos, una evaluación por día) está muy por debajo de las 25.000
+evaluaciones mensuales del free tier.
+
 | Ítem | Coste |
 |---|---|
 | CloudTrail (eventos de management, una trail) | $0 — la primera copia es gratis |
-| S3 (archivo del trail) | centavos; el lifecycle lo baja a Glacier a los 30 días |
-| CloudWatch Logs (copia consultable, 30 días) | ~$0.50/GB → centavos |
-| 13 metric filters + 7 alarmas | centavos |
-| AWS Config (13 reglas + recorder + historial) | $0 — 25.000 evaluaciones/mes gratis; esta cuenta usa una fracción |
-| GuardDuty | 30 días gratis; después $4 por millón de eventos de management |
-| CodeQL (repo público) | $0 |
-| Dependabot (repo público) | $0 |
+| S3 (archivo del trail y del historial de Config) | $0 |
+| CloudWatch Logs (copia consultable, 30 días) | $0 — 5 GB always free |
+| 13 metric filters + 7 alarmas | $0 — dentro de las 10 + 10 always free |
+| AWS Config (13 reglas + recorder + historial) | $0 — 25.000 evaluaciones/mes gratis |
+| CodeQL + Dependabot (repo público) | $0 |
+| **GuardDuty** | **$0 — no se activa a propósito** (§7) |
 
-**Total estimado: < $1/mes.** El detalle está en [AWS Billing](https://us-east-1.console.aws.amazon.com/billing/home).
+**Total del bloque de seguridad: $0,00.**
+
+Además hay dos presupuestos que cortan solo, con las notificaciones
+publicando en el topic del proyecto (así llegan al mismo correo que las
+alarmas):
+
+| Presupuesto | Umbral | Avisa | Canal |
+|---|---|---|---|
+| `journal-capstone-budget` | $10,00/mes | 80% ($8) | SNS `journal-api-alarms` → email |
+| `My Zero-Spend Budget` | $1,00/mes | 50%, 80% y 100% | SNS `journal-api-alarms` → email |
+
+Las notificaciones de presupuesto se cambiaron a suscriptor SNS: las que
+tenían no tenían a nadie escuchando (el campo `Subscribers` no existe en
+el API de lectura, así que no se veía, pero el aviso no llegaba a ningún
+lado). Con el suscriptor SNS, el aviso del presupuesto llega al mismo
+correo que el resto de las alarmas.
+
+> Nota: a las notificaciones de presupuesto no se les puede agregar un
+> suscriptor de email directamente sin una dirección de billing verificada,
+> y esa verificación necesita un método de pago. El topic de SNS del
+> proyecto esquiva eso sin costo.
 
 ---
 

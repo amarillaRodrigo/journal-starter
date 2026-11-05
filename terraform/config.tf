@@ -500,6 +500,7 @@ data "aws_iam_policy_document" "alarms_topic" {
       identifiers = [
         "cloudwatch.amazonaws.com",
         "events.amazonaws.com",
+        "budgets.amazonaws.com",
       ]
     }
 

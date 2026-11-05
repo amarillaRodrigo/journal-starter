@@ -123,11 +123,32 @@ breakdown are documented in **[docs/observability.md](docs/observability.md)**.
 
 ### 4. Cost Controls
 
-- AWS Budget with a $10.00 USD monthly threshold and email alerting.
-- Approximate operating cost: **~$25/month** on-demand (`t3.small` + EBS +
-  public IPv4 + ECR + CloudWatch/X-Ray/SNS), of which **~$4.90/month** is
-  observability and **~$7.59/month** is the resize from `t3.micro` to
+**The account has no payment method on purpose: everything stays in the
+free tier, and AWS has no way to charge anything.** Measured with
+`aws ce get-cost-and-usage` on 2026-11-05: **$0.00 for the month**, every
+service at zero.
+
+- All nine free-tier usages of this project are **"Always Free"** (free
+  permanently, not a 6-month promo): 7 of 10 CloudWatch alarms, 5 of 10
+  CloudWatch metrics, 1 of 3 dashboards, 5 GB of log storage, 100.000 X-Ray
+  traces, 20.000 KMS requests, 1.000.000 SNS requests, 1.000.000 Glue
+  catalog requests and 5 GB of data processing. The end-of-month forecast
+  is under every limit.
+- **Two budgets** cut the wire alone, and their notifications publish to the
+  project's SNS topic (so they arrive at the same inbox as the alarms):
+  `journal-capstone-budget` ($10/month, alerts at 80%) and
+  `My Zero-Spend Budget` ($1/month, alerts at 50%, 80% and 100%).
+- GuardDuty is **not** enabled: it needs a subscription that the free tier
+  does not cover, and it bills $4 per million events after the 30-day
+  trial. AWS Config is the threat detection service instead (free tier, no
+  subscription needed).
+- On-demand price if the free tier did not apply: **~$25/month** (`t3.small`
+  + EBS + public IPv4 + ECR + CloudWatch/X-Ray/SNS), of which ~$4.90/month
+  is observability and ~$7.59/month is the resize from `t3.micro` to
   `t3.small` needed to run k3s + app + database + agents.
+
+The full breakdown, with the measured numbers, is in
+**[docs/security.md §8](docs/security.md)**.
 
 ### 5. Production Limitations
 

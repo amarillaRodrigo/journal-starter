@@ -382,22 +382,74 @@ mismo.
 
 | Ítem | Por qué | Qué quedó |
 |---|---|---|
-| GuardDuty | `SubscriptionRequiredException`: la cuenta no tiene método de pago | IaC lista y probada en `terraform/security.tf` detrás de `enable_guardduty`; la alarma existe. Se activa con una tarjeta + `true` + `apply`. |
+| GuardDuty | `SubscriptionRequiredException`: la cuenta no tiene método de pago, y **no se va a agregar** (decisión: todo free tier) | IaC lista y probada en `terraform/security.tf` detrás de `enable_guardduty`; la alarma existe. AWS Config cubre el rol de threat detection. |
 | Evento de conformidad de AWS Config | AWS Config no lo publica en esta cuenta (verificado con captura directa) | La alerta se hace sobre el evento que sí llega; el estado de conformidad se consulta por API. |
 | Que las alarmas corran en el fork | El repositorio de origen tiene Actions deshabilitado y el fork lo hereda | El pipeline vive en `journal-starter-pipeline`; el fork tiene el mismo código y los mismos workflows. |
 | Migrar las alarmas del trail a EventBridge | No es un bloqueo: es que los metric filters ya están verificados end-to-end | Las reglas de EventBridge funcionan (verificado por captura directa); la migración queda como mejora pendiente. |
 
 ---
 
-## 7. Costos
+## 7. Costos: free tier, sin tarjeta
 
-| Ítem | Coste |
-|---|---|
-| CloudTrail (1 trail) | $0 |
-| S3 + KMS (bucket de auditoría) | centavos |
-| CloudWatch Logs (30 días) | centavos |
-| 13 metric filters + 7 alarmas | centavos |
-| AWS Config (13 reglas + recorder) | $0 (free tier de 25.000 evaluaciones/mes) |
-| CodeQL + Dependabot (repo público) | $0 |
+```bash
+aws ce get-cost-and-usage --time-period Start=2026-11-01,End=2026-11-05 \
+  --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE
+```
 
-**Total estimado: < $1/mes.**
+```
+AWS CloudTrail                              0 USD
+AmazonCloudWatch                            0 USD
+Amazon Simple Notification Service          0 USD
+Amazon Simple Storage Service    0.0000000016 USD
+AWS Key Management Service       -0.0000001034 USD
+AWS X-Ray                                   0 USD
+Amazon Elastic Compute Cloud - Compute       0 USD
+Amazon EC2 Container Registry (ECR)          0 USD
+Amazon Virtual Private Cloud                 0 USD
+AWS Secrets Manager              -0.0000000768 USD
+AWS Glue                                    0 USD
+Tax                                         0 USD
+```
+
+**Total del mes: $0,00.** Los valores negativo-diminutos son créditos del
+free tier cubriendo el cargo.
+
+```bash
+aws freetier get-free-tier-usage
+```
+
+| Uso | Límite | Ahora | Fin de mes | Tipo |
+|---|---|---|---|---|
+| CloudWatch alarmas | 10 | 0,87 | 6,49 | Always Free |
+| CloudWatch métricas | 10 | 0,96 | 7,17 | Always Free |
+| CloudWatch dashboards | 3 | 0,12 | 0,93 | Always Free |
+| CloudWatch logs (storage) | 5 GB | 0,01 | 0,08 | Always Free |
+| CloudWatch PutLogEvents | 5 | 0,07 | 0,55 | Always Free |
+| X-Ray trazas almacenadas | 100.000 | 968 | 5.808 | Always Free |
+| KMS requests | 20.000 | 1 | 6 | Always Free |
+| SNS requests | 1.000.000 | 5 | 37,5 | Always Free |
+| Glue Catalog-Request | 1.000.000 | 18 | 108 | Always Free |
+
+Los nueve usos son **"Always Free"**: gratis permanente, no una promoción
+de 6 meses. El pronóstico de fin de mes está bajo cada límite.
+
+Y lo que hace el conjunto airtight: **la cuenta no tiene método de pago**,
+así que no hay ni el mecanismo para cobrar. Dos presupuestos cortan
+solo, los dos en `HEALTHY` con gasto $0,00, y **sus notificaciones
+publican en el topic SNS del proyecto** (por eso llegan al mismo correo
+que las alarmas):
+
+| Presupuesto | Umbral | Avisa | Canal |
+|---|---|---|---|
+| `journal-capstone-budget` | $10,00/mes | 80% ($8) | SNS `journal-api-alarms` → email |
+| `My Zero-Spend Budget` | $1,00/mes | 50%, 80% y 100% | SNS `journal-api-alarms` → email |
+
+Las notificaciones se recrearon con suscriptor SNS: las que había no
+tenían a nadie escuchando. Un suscriptor de email directo no se puede
+agregar sin una dirección de billing verificada, y esa verificación pide
+método de pago: el topic de SNS lo resuelve sin costo.
+
+**GuardDuty no se activa, a propósito**: requiere suscripción de pago
+(que el free tier no cubre) y cobra $4 por millón de eventos después de
+los 30 días de prueba. AWS Config cubre el mismo rol de threat detection
+dentro del free tier.
