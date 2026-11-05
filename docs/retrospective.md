@@ -177,15 +177,22 @@ borra todo. Que el procedimiento de limpieza exista y esté escrito (y que
 diga exactamente qué se rompe y por qué) es parte del trabajo de seguridad,
 no un extra.
 
+**5. Un plan que propone cambiar algo que "no cambió" no es ruido: es
+información.** El diff fantasma de los finales de línea (§4.2) no era un
+bug del plan sino del archivo del que leía. Aplicarlo a ciegas habría
+reiniciado la instancia de producción; ignorarlo a ciegas habría dejado un
+`plan` sucio que se propaga a cada commit. Lo correcto fue **entender qué
+estaba comparando** antes de decidir.
+
 ### 3.2 Los que son técnicos y transferibles
 
-**5. `kubectl apply` de un ConfigMap no recarga una app que lo lee desde
+**6. `kubectl apply` de un ConfigMap no recarga una app que lo lee desde
 disco.** Este es el hallazgo más caro del proyecto y el que más tiempo
 consumió. Está documentado en detalle en §4.1 porque la estrategia del
 sistema (checksum en el pod template) es la que se va a necesitar en
 cualquier proyecto que sirva su configuración desde un ConfigMap.
 
-**6. El tráfico de red se corta en el grupo de seguridad, no en el
+**7. El tráfico de red se corta en el grupo de seguridad, no en el
 proceso.** El Postgres escuchaba en `0.0.0.0:5432` **dentro del pod**, y el
 nodo no tenía ningún listener en 5432. Lo que hacía imposible el acceso
 externo eran tres capas independientes: el SG (no abre 5432), el tipo de
@@ -193,13 +200,13 @@ servicio (`ClusterIP`, sin `NodePort`) y la ausencia de `hostPort`. **Cada
 capa sola habría bastado**; las tres juntas es lo que hace que la
 verificación sea concluyente.
 
-**7. Un único plano de fallo es un plano de fallo.** La instancia, el cluster
+**8. Un único plano de fallo es un plano de fallo.** La instancia, el cluster
 de k3s, la base de datos, la red y el ingress están todos en el mismo lugar.
 Eso no es una decisión de seguridad sino de simplicidad, y tiene un precio
 concreto: no hay forma de que la base de datos esté aislada sin que el
 ingress también lo esté, porque **son la misma máquina**.
 
-**8. Lo que no se puede automatizar tiene que estar documentado con el mismo
+**9. Lo que no se puede automatizar tiene que estar documentado con el mismo
 cuidado que lo que sí.** El MFA del usuario no se puede manejar en Terraform
 (el seed TOTP es una credencial). Quedó como procedimiento manual, con el
 seed en `~/.aws/` con permisos restringidos y fuera del repo. La regla que
@@ -207,7 +214,7 @@ surgió: *si un paso del checklist no puede ser IaC, entonces el procedimiento
 manual es parte del entregable y tiene el mismo nivel de detalle que el
 código*.
 
-**9. Los entornos reales rompen las herramientas.** En esta cuenta: las
+**10. Los entornos reales rompen las herramientas.** En esta cuenta: las
 métricas de EventBridge y de SNS no se publican; el `boto3` local exige
 parámetros en PascalCase en algunos servicios y devuelve `dict`s en vez de
 strings; el AWS CLI local no tiene el servicio `config`; los QR de MFA son
@@ -271,7 +278,62 @@ ConfigMap necesita un mecanismo de *disparo* del rollout, no solo el
 `apply`. Las tres formas habituales son el checksum (la que se usó acá), un
 `kubectl rollout restart` explícito, o un sidecar que recargue.
 
-### 4.2 Un group de seguridad con dos puertos abiertos protege más de lo que parece
+### 4.2 Un `terraform plan` puede mentir por los finales de línea
+
+**Este es el segundo hallazgo caro del proyecto**, y también es uno de los
+que más cuesta ver, porque el plan dice la verdad sobre los *bytes* y la
+mentira está en lo que uno cree que significan.
+
+**Síntoma:** `terraform plan` proponía cambiar tres *query definitions* de
+CloudWatch Logs. Los valores del diff eran **idénticos** a los que ya estaban
+en el estado. No había ningún cambio real: el plan era ruido puro.
+
+**Diagnóstico:**
+
+1. Los heredocs de Terraform (`<<-EOT`) conservan los finales de línea del
+   **archivo**, tal cual. Un `.tf` con CRLF produce un `query_string` que
+   termina en `\r\n`.
+2. El estado de Terraform se creó desde un checkout con **LF**, así que
+   guardaba `\n`.
+3. El repo no tenía regla de finales de línea para `.tf`, y con
+   `core.autocrlf=true` (el default de Windows) un checkout los traía con
+   **CRLF**. El archivo se veía idéntico; el valor de Terraform, no.
+
+Lo que lo hacía especialmente traicionero es que **no era solo un problema de
+checkout nuevo**: el hook de pre-commit hace un `stash`/`pop` de los cambios
+sin commitear, y ese ciclo **reescribe** los `.tf` con CRLF aunque el repo
+los haya Materializado con LF. O sea: el bug podía reaparecer *en medio de
+un cambio que no tenía nada que ver*, y volver a|numero.
+
+**La mitad difícil: `main.tf` no se puede normalizar.** El `user_data` de la
+instancia está desplegado con CRLF (33 líneas con `\r\n`) y el estado lo
+tiene así. El provider de AWS compara el `user_data` **por hash**: si el
+valor cambia, hace un **stop/start** de la instancia. Verificado sobre una
+copia del directorio: con `main.tf` en LF, el plan propone `~ user_data`, que
+es un reinicio de producción.
+
+El `user_data` con CRLF es inofensivo donde está: **cloud-init lo normaliza a
+LF antes de ejecutarlo**, y por eso el bootstrap funcionó y el swapfile quedó
+creado (verificado en `/var/lib/cloud/instance/scripts/part-001` del nodo, que
+está en LF puro).
+
+**Cómo quedó resuelto:** una regla de `.gitattributes` que fija
+`terraform/*.tf` en LF, con **una excepción explícita para `main.tf`**, que se
+deja en CRLF a propósito y con el motivo documentado en el archivo. La
+excepción se puede borrar el día que el `user_data` se regenere con LF de
+forma consciente.
+
+Verificado de punta a punta: un **clon nuevo** del repo, con el estado real
+y el `terraform.tfvars`, da `terraform plan` → **"No changes"**. Antes de la
+corrección, el mismo clon daba tres cambios fantasma.
+
+**La lección general:** un `plan` que propone cambiar algo que "no cambió" no
+es ruido que se ignora: es información. Y la respuesta correcta no siempre
+es "arreglar el plan", sino **entender qué está comparando el plan** antes
+de aceptarlo o rechazarlo. Aquí la respuesta fue "no apliques esto: el plan
+está bien, lo que está mal es el archivo del que leyó".
+
+### 4.3 Un group de seguridad con dos puertos abiertos protege más de lo que parece
 
 El caso del ítem 3 (base de datos en subnet privada) se resolvió documentando
 la desviación, pero el trabajo de verificación **sí** dio un resultado

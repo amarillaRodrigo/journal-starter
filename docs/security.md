@@ -793,6 +793,35 @@ necesita un mecanismo de *disparo* del rollout, no solo el `apply`. Las tres
 formas habituales son el checksum (la que se usa acá), un
 `kubectl rollout restart` explícito, o un sidecar que recargue.
 
+### Un `terraform plan` puede mentir por los finales de línea
+
+Un hallazgo de la misma familia, con el mismo nivel de desconcierto: el
+`terraform plan` proponía cambiar tres *query definitions* de CloudWatch Logs
+**sin que nada hubiera cambiado**.
+
+La causa: los heredocs de Terraform (`<<-EOT`) conservan los finales de línea
+del archivo. Un `.tf` con CRLF produce un `query_string` que termina en
+`\r\n`, que **no** es igual al que está guardado en el estado (creado con
+LF). El repo no tenía regla de finales de línea para `.tf`, así que con
+`core.autocrlf=true` un checkout los traía con CRLF.
+
+El detalle que lo hace más traicionero: el hook de pre-commit hace un
+`stash`/`pop` de los cambios sin commitear, y ese ciclo **reescribe** los
+`.tf` con CRLF. O sea, el bug podía reaparecer en medio de un cambio que no
+tenía nada que ver.
+
+Se corrigió fijando `terraform/*.tf` en LF en `.gitattributes`, con **una
+excepción explícita para `main.tf`**: su `user_data` está desplegado con CRLF
+y el provider de AWS compara ese valor por hash, así que cambiarlo provoca
+un **stop/start** de la instancia de producción. La excepción y su motivo
+están documentados en el propio `.gitattributes`.
+
+Verificado de punta a punta: un **clon nuevo** del repo, con el estado real
+y el `terraform.tfvars`, da `terraform plan` → **"No changes"**. Antes de la
+corrección, el mismo clon daba tres cambios fantasma.
+
+El detalle completo está en [retrospective.md §4.2](retrospective.md#42-un-terraform-plan-puede-mentir-por-los-finales-de-línea).
+
 ### El `destroy` del bucket de auditoría
 
 El bucket tiene `force_destroy = false`: el trail es evidencia y no debería
