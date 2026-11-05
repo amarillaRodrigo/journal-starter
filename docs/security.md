@@ -589,6 +589,18 @@ Ver §2. Un patrón simple puede matchear un término que aparece en otro
 campo del mismo evento. Los patrones están escritos para ser específicos y
 anclados por `eventSource`.
 
+### AWS Config no entrega el evento de conformidad a EventBridge
+
+Verificado el 2026-11-05 con dos cambios de conformidad reales (crear y
+borrar la password policy de la cuenta) y una regla catch-all sobre el bus
+default: en 5 minutos de captura no apareció ningún evento
+`Config Rules Compliance Change`, solo `Config Configuration Item Change`.
+
+Consecuencia: la regla `journal-api-config-noncompliant` no matchea nada
+hoy. La alerta real va por `journal-api-config-changes`, que matchea el
+evento de cambio de configuración de un recurso relevante. El estado de
+conformidad se consulta por API o en la consola.
+
 ### Los dos hallazgos de Config no están resueltos
 
 `journal-api-iam-user-mfa` y `journal-api-iam-password-policy` están en
