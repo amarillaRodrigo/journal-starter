@@ -747,9 +747,27 @@ con `no leaks found` y el job `test` sigue en verde.
 
 ---
 
+## 14. Se filtró una credencial
+
+**El procedimiento completo esta en
+[incident-response.md](incident-response.md)**: que se filtro, como se rota
+cada tipo de credencial en el orden correcto, como se verifica si hubo
+acceso no autorizado con el audit trail, a quien se avisa y con que
+mensaje.
+
+Se dejo aca solo el puntero para no tener dos versiones de lo mismo: el
+runbook de incidentes es un documento aparte, mas corto y en ingles,
+porque es el entregable del bloque *Monitoring & Incident Response* del
+currículum.
+
+---
+
 ## Referencias
 
+- [incident-response.md](incident-response.md): qué hacer si se filtra una credencial.
+- [security.md](security.md): audit trail, alarmas de seguridad y verificación end-to-end.
 - [delivery.md](delivery.md): cadena de entrega y verificación commit ↔ imagen ↔ `/version`.
 - [deployment-ec2.md](deployment-ec2.md): arquitectura, secretos, deploy manual y Terraform.
 - [observability.md](observability.md): pipeline de telemetría, alarmas y prueba end-to-end.
+- [evidence-security-incident-response.md](evidence-security-incident-response.md): verificación end-to-end del bloque de seguridad.
 - [Troubleshooting de desarrollo local](reference/troubleshooting.md): devcontainer, `.env` y tests.
