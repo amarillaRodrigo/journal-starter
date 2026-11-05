@@ -24,6 +24,8 @@ procedimiento paso a paso ante una fuga de credenciales),
 | Detección de amenazas canónica | `aws_guardduty_detector.this` | Patrones de ataque: **bloqueada por la cuenta** (§7) |
 | Análisis estático | `.github/workflows/codeql.yml` | Flujos de datos inseguros en Python (§5) |
 | Actualizaciones de dependencias | `.github/dependabot.yml` | Actions y dependencias de Python al día |
+| HSTS | `k8s/caddy.yaml` (header de Caddy) | El navegador no vuelve a HTTP durante un año (§9.2, ítem 4) |
+| Aislamiento de la base de datos | `aws_security_group.journal_sg` + Service `ClusterIP` | 5432 no es alcanzable desde Internet; la subnet privada es una desviación documentada ([network-isolation.md](network-isolation.md)) |
 
 La IaC vive en `terraform/security.tf` (audit trail y alarmas) y
 `terraform/config.tf` (detección de amenazas). CodeQL y Dependabot son
@@ -36,7 +38,7 @@ workflows de GitHub.
 ```
 CloudTrail ──┬──▶ S3 (journal-api-audit-607856468834-us-east-1)  [KMS + Glacier + 365 días]
              │         └── digest de integridad (enable_log_file_validation)
-             └──▶ CloudWatch Logs (aws-cloudtrail-logs-journal-api)  [30 días]
+             └──▶ CloudWatch Logs (aws-cloudtrail-logs-journal-api)  [90 días]
 ```
 
 Decisiones y su porqué:
@@ -54,6 +56,11 @@ Decisiones y su porqué:
 - **Doble copia a propósito.** S3 es el archivo (barato, durable, 30 días en
   caliente y después Glacier). CloudWatch Logs es lo que se consulta en 10
   segundos cuando hay que responder una pregunta.
+- **90 días de retención en la copia consultable.** Lo que el checklist pide
+  para el log de auditoría es ≥ 90 días: con 30 días, un incidente que se
+  detecta tarde ya no tiene logs que investigar. El costo es despreciable y no
+  depende de la retención (ver §8): se paga por lo que se ingiere y por lo que
+  se guarda, y el log group del trail ocupa ~10 MB.
 
 ### Tres requisitos de la API que no son opcionales
 
@@ -758,11 +765,118 @@ Lo que sí quedó en Terraform: la password policy de la cuenta
 (`aws_iam_account_password_policy`), que es lo que cierra la regla
 `IAM_PASSWORD_POLICY`.
 
+### Un cambio en el ConfigMap de Caddy no llega al proceso que lo lee
+
+**Este es el hallazgo más caro del proyecto**, y está documentado con detalle
+en [retrospective.md §4.1](retrospective.md#41-caddy-no-recarga-un-configmap-el-cambio-se-pierde-en-silencio).
+
+En resumen: `kubectl apply` de un ConfigMap **reporta éxito** y el kubelet
+**sí** actualiza el archivo en el volumen del pod (verificado: a los ~50 s el
+`Caddyfile` en disco ya era el nuevo), pero **Caddy no lo relee**. Su watcher
+sigue el inodo del archivo y el kubelet actualiza los volúmenes de ConfigMap
+de forma atómica (swap del symlink `..data`), así que nunca se emite un
+evento de modificación; y con `admin off` tampoco hay admin API para forzar
+un `reload`. Se probó con y sin `admin off`: en los dos casos, cero recargas.
+
+El síntoma es especialmente traicionero porque **todo parece bien**: el
+`apply` OK, el rollout OK, el ConfigMap correcto en la API de Kubernetes. Solo
+falta el header en la respuesta. Un control de seguridad aplicado de esta
+forma es un control que **nunca existió**.
+
+**Cómo quedó resuelto:** un checksum del manifiesto renderizado en una
+anotación del pod template (`caddyfile-checksum`), que `deploy-k8s.sh`
+calcula en cada deploy. Cuando el Caddyfile cambia, el template cambia y
+Kubernetes hace el rollout, que ya arranca con el ConfigMap nuevo.
+
+**La lección general:** una app que lee su configuración de un ConfigMap
+necesita un mecanismo de *disparo* del rollout, no solo el `apply`. Las tres
+formas habituales son el checksum (la que se usa acá), un
+`kubectl rollout restart` explícito, o un sidecar que recargue.
+
 ### El `destroy` del bucket de auditoría
 
 El bucket tiene `force_destroy = false`: el trail es evidencia y no debería
 borrarse con un `terraform destroy`. Para destruir el stack hay que vaciar
 el bucket primero.
+
+El procedimiento completo está en [cleanup.md](cleanup.md).
+
+---
+
+## 7.1 HTTPS y HSTS
+
+El control de transporte vive en `k8s/caddy.yaml`, que es el ConfigMap que
+Caddy monta como su `Caddyfile`:
+
+```
+__PUBLIC_IP__.sslip.io {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    reverse_proxy journal-api-service:8000
+}
+```
+
+Qué resuelve cada parte:
+
+| Parte | Qué hace |
+|---|---|
+| `encode zstd gzip` | Comprime la respuesta (la API devuelve JSON, que comprime muy bien) |
+| `header { Strict-Transport-Security ... }` | **HSTS**: el navegador queda obligado a usar HTTPS con este host durante un año, aunque el usuario escriba la URL en claro |
+| `reverse_proxy journal-api-service:8000` | El tráfico TLS termina en Caddy y la API habla HTTP dentro del cluster (red de pods, sin exposición) |
+
+**Por qué `max-age=31536000`:** es el mínimo recomendado (un año) y lo que
+pide el checklist. Un `max-age` corto no protege: el navegador vuelve a
+aceptar HTTP apenas expira.
+
+**Por qué `includeSubDomains`:** el host real es
+`3.215.52.10.sslip.io`, y `sslip.io` resuelve **cualquier** etiqueta delante
+de la IP al mismo servidor. La política los cubre a todos. En un dominio
+propio habría que decidirlo con el criterio del dominio.
+
+**Por qué NO `preload`:** la lista de preload de los navegadores exige
+controlar el dominio registrable, y `sslip.io` no es de este proyecto.
+Anunciar `preload` sin estar en la lista no aporta nada y da una falsa
+sensación de protección.
+
+**La verificación**, contra la API viva:
+
+```bash
+IP=$(terraform -chdir=terraform output -raw public_ip)
+curl -sS -D- -o NUL "https://${IP}.sslip.io/entries"
+```
+
+```
+HTTP/1.1 200 OK
+Alt-Svc: h3=":443"; ma=2592000
+Content-Length: 1583
+Content-Type: application/json
+Date: ...
+Server: uvicorn
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+Via: 1.1 Caddy
+```
+
+Y el redirect de HTTP a HTTPS:
+
+```bash
+curl -sS -D- -o NUL "http://${IP}.sslip.io/entries"
+```
+
+```
+HTTP/1.1 308 Permanent Redirect
+Location: https://3.215.52.10.sslip.io/entries
+```
+
+> **Este control costó un arreglo en el mecanismo de despliegue, no solo en el
+> archivo.** El header se agregó al `Caddyfile`, se aplicó el manifiesto y
+> **no apareció** en las respuestas: Caddy no recarga un ConfigMap (§7). La
+> causa y el arreglo (un checksum en el pod template) están en §7 y en
+> [retrospective.md §4.1](retrospective.md#41-caddy-no-recarga-un-configmap-el-cambio-se-pierde-en-silencio).
+> El header de arriba se verificó **después** de ese arreglo.
 
 ---
 
@@ -815,13 +929,57 @@ evaluaciones mensuales del free tier.
 |---|---|
 | CloudTrail (eventos de management, una trail) | $0 — la primera copia es gratis |
 | S3 (archivo del trail y del historial de Config) | $0 |
-| CloudWatch Logs (copia consultable, 30 días) | $0 — 5 GB always free |
+| CloudWatch Logs (copia consultable, 90 días) | $0 — 5 GB always free |
 | 13 metric filters + 7 alarmas | $0 — dentro de las 10 + 10 always free |
 | AWS Config (13 reglas + recorder + historial) | $0 — 25.000 evaluaciones/mes gratis |
 | CodeQL + Dependabot (repo público) | $0 |
 | **GuardDuty** | **$0 — no se activa a propósito** (§7) |
 
 **Total del bloque de seguridad: $0,00.**
+
+### El costo de subir la retención del log de auditoría a 90 días
+
+La retención de la copia consultable del trail se subió de 30 a 90 días
+(`var.audit_log_retention_days`). Vale la pena dejar el cálculo hecho, porque
+"más retención" suena a "más gasto" y no es así:
+
+**Lo que no cambia:** el costo de **ingesta**. Se paga por el volumen que
+entra, y la retención no cambia cuánto entra. CloudWatch Logs cobra **$0,50
+por GB** de log data ingerido en Standard log class (us-east-1, precio de
+listado de AWS).
+
+**Lo que sí cambia:** el **almacenamiento**, y solo en la ventana extra que
+se conserva. El log group `aws-cloudtrail-logs-journal-api` ocupa **10,5 MB**
+(medido el 2026-11-05, con 27.447 eventos desde el 2026-10-23). CloudWatch Logs
+cobra **$0,03 por GB-mes** de almacenamiento.
+
+| Retención | Almacenamiento steady-state | Costo de almacenamiento |
+|---|---|---|
+| 30 días | ~10,5 MB (lo que hay hoy) | ~$0,0003/mes |
+| **90 días** | ~31 MB | **~$0,0009/mes** |
+
+El delta es de **menos de un centavo al mes**. Y ni siquiera se paga: el
+free tier da **5 GB-Mo** de almacenamiento y **5 GB** de ingesta al mes
+("Always Free"), y el uso real de la cuenta está en **0,011 GB-Mo** de
+almacenamiento y **0,073 GB** de ingesta, con un pronóstico de **0,081 GB-Mo**
+y **0,546 GB** respectivamente.
+
+> Con números del `aws freetier get-free-tier-usage` del 2026-11-05:
+> `TimedStorage-ByteHrs` actual 0,0107 GB-Mo (pronóstico 0,0805, límite 5,0) y
+> `DataProcessing-Bytes` actual 0,0728 GB (pronóstico 0,5456, límite 5,0).
+> Los dos usos quedan en menos del 11 % de su free tier.
+
+La retención de 90 días no cuesta casi nada **en este proyecto**, y sube el
+log group de 30 a 90 días de historia auditable: con 30 días, un incidente que
+se detecta tarde ya no tiene logs que investigar. El costo que de verdad
+importa en un audit trail no es la retención del log group: es el **volumen
+del trail completo de la cuenta** (que va growing en volumen, no en
+retención), y ese está en el free tier de CloudTrail y en el bucket de S3 con
+lifecycle a Glacier.
+
+Además, el archivo **durable** del trail vive en S3 con **365 días** de
+retención (`terraform/security.tf`), así que la evidencia de auditoría a
+largo plazo no depende en absoluto de la retención del log group.
 
 Además hay dos presupuestos que cortan solo, con las notificaciones
 publicando en el topic del proyecto (así llegan al mismo correo que las
@@ -847,6 +1005,8 @@ correo que el resto de las alarmas.
 
 ## 9. Qué queda del checklist
 
+### 9.1 Checklist del currículum
+
 | Ítem del currículum | Estado |
 |---|---|
 | Habilitar audit logging (CloudTrail) | ✅ `terraform/security.tf` |
@@ -854,6 +1014,37 @@ correo que el resto de las alarmas.
 | Habilitar detección de amenazas | ✅ AWS Config: 13 reglas, **12 conformes** y los 3 hallazgos reales cerrados (§4) — GuardDuty: IaC lista pero bloqueada por la cuenta (§7) |
 | GitHub Security Scanning (CodeQL) | ✅ `.github/workflows/codeql.yml`, run verde en `main` |
 | Runbook de respuesta a incidentes | ✅ [incident-response.md](incident-response.md) |
+
+### 9.2 Checklist de seguridad del capstone
+
+El checklist de nueve ítems del capstone, con el estado **verificado** (no
+supuesto) al 2026-11-05:
+
+| # | Ítem | Estado | Dónde está la evidencia |
+|---|---|---|---|
+| 1 | Service account para la app | ✅ | `journal-api-runtime-role` con `GetSecretValue` sobre 2 ARN exactos; pod con `serviceAccountName: journal-api`; sin `.env` en la VM — [delivery.md §3](delivery.md#3-ciclo-de-vida-de-los-secretos) |
+| 2 | Secretos en Secrets Manager | ✅ | Secretos + init container a `emptyDir` 0600; sin credenciales en etcd ni en el env — [delivery.md §3](delivery.md#3-ciclo-de-vida-de-los-secretos) |
+| 3 | Base de datos en subnet privada | ⚠️ **Desviación documentada** | La DB **no** está en una subnet privada: la instancia de k3s es la misma que sirve la API pública. Lo que sí se cumple: el SG **no abre 5432** y el puerto **da timeout desde afuera**; el servicio es `ClusterIP` y sin `hostPort`. Evidencia completa y plan de cierre en **[network-isolation.md](network-isolation.md)** |
+| 4 | HTTPS con HSTS | ✅ | TLS válido, 308 de 80 a 443, y `Strict-Transport-Security: max-age=31536000; includeSubDomains` en la respuesta. Requiere el checksum del pod template para que el cambio llegue a Caddy (§7) |
+| 5 | Audit logging con retención ≥ 90 días | ✅ | CloudTrail con KMS, digest, eventos globales y S3 a 365 días; la copia consultable en CloudWatch Logs con **90 días** de retención |
+| 6 | Alerta de seguridad | ✅ | 4 alarmas sobre el trail; disparo verificado end-to-end (llegaron los correos) — §3 y §10 |
+| 7 | Security scanning | ✅ con salvedad | CodeQL en el fork **y** en el espejo, run verde en `main`; Dependabot con 4 PRs; 2 alertas de CodeQL triadas y 0 abiertas — §5 |
+| 8 | Limpieza de recursos | ⏸️ **Preparada, no ejecutada** | Procedimiento completo en **[cleanup.md](cleanup.md)**. No se ejecutó porque la plataforma de evaluación sondea la API viva: el `destroy` requiere confirmación explícita |
+| 9 | Retrospectiva | ✅ | **[retrospective.md](retrospective.md)**: qué se implementó, qué se haría distinto y los aprendizajes |
+
+Los tres puntos que no son un ✅simple:
+
+- **El 3 es una desviación, no un incumplimiento silencioso.** El aislamiento
+  de red de la base de datos no se cumple en la forma que pide el enunciado
+  (subnet privada física), porque el diseño es de una sola instancia y esa
+  instancia tiene que ser pública. A cambio, el puerto 5432 no es alcanzable
+  desde Internet, verificado en tres capas independientes. Está documentado
+  con evidencia y con un plan de cierre.
+- **El 4 necesitó un arreglo en el mecanismo de despliegue**, no solo en el
+  archivo: un cambio en el ConfigMap de Caddy no llegaba al proceso que lo
+  lee (§7). El header se verificó en vivo después del fix.
+- **El 8 está escrito y verificado en seco, pero no ejecutado** por la razón
+  del gate humano que está en `cleanup.md` §5.1.
 
 ---
 
@@ -920,6 +1111,9 @@ aws config get-compliance-summary-by-config-rule
 - [runbook.md](runbook.md): troubleshooting del entorno desplegado.
 - [observability.md](observability.md): métricas y alarmas de la aplicación.
 - [delivery.md](delivery.md): cadena de entrega y verificación commit ↔ imagen ↔ `/version`.
+- [network-isolation.md](network-isolation.md): qué está realmente aislado en la red y qué no (la desviación del ítem 3 del checklist).
+- [cleanup.md](cleanup.md): el procedimiento para desmontar todo lo desplegado (check 8), escrito y **no ejecutado**.
+- [retrospective.md](retrospective.md): la retrospectiva del bloque de seguridad (check 9).
 - [evidence-security-incident-response.md](evidence-security-incident-response.md): la verificación de todo lo de este documento, con la salida real de los comandos.
 - [AWS CloudTrail User Guide](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-concepts.html).
 - [Sintaxis de filter patterns](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html).

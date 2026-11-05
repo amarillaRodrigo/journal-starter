@@ -108,7 +108,7 @@ environment `production`.
 | Telemetría | `k8s/adot-collector.yaml` | ConfigMap `adot-collector-config`, Deployment `adot-collector`, Service ClusterIP `adot-collector:4318` |
 | Logs | `k8s/fluent-bit.yaml` | ServiceAccount + ClusterRole/Binding, ConfigMap `fluent-bit-config`, DaemonSet `fluent-bit` |
 | Base de datos | `k8s/postgresql.yaml` | PVC `postgres-data` (1Gi), Service `postgres:5432`, Deployment `postgres` |
-| Entrada HTTP | `k8s/caddy.yaml` | ConfigMap `caddy-config` (hostname y email ACME resueltos en deploy time), PVC `caddy-data` (TLS), Deployment `caddy` con hostPort 80/443 |
+| Entrada HTTP | `k8s/caddy.yaml` | ConfigMap `caddy-config` (hostname y email ACME resueltos en deploy time, más el checksum que dispara el rollout), PVC `caddy-data` (TLS), Deployment `caddy` con hostPort 80/443 y header HSTS |
 | Servicio interno de la API | `k8s/service.yaml` | Service ClusterIP `journal-api-service:8000` (consumido por Caddy) |
 | Aplicación | `k8s/deployment.yaml` | Deployment `journal-api` (1 réplica, `strategy: Recreate`), probes en `/version`, límites 320Mi/700m |
 | Secretos (siembra) | `scripts/migrate-secrets.sh` | mueve el valor de SSM Parameter Store a Secrets Manager **fuera de banda**; también rota (`--set-llm-key`) y limpia los parámetros viejos (`--cleanup-ssm`) |
@@ -132,7 +132,7 @@ El script es la única fuente de verdad del orden de aplicación. Con
 | 2 | `kubectl apply -f k8s/adot-collector.yaml -f k8s/fluent-bit.yaml` + `rollout status` de ambos | ADOT Collector y Fluent Bit listos **antes** de la app (para no perder la primera telemetría) |
 | 3 | lee `/journal-api/{OPENAI_BASE_URL,OPENAI_MODEL,ACME_EMAIL}` de SSM Parameter Store | solo configuración no sensible, con `GetParameter` |
 | 4 | crea/actualiza el ConfigMap `journal-config` y el pull secret `ecr-credential`, y borra los Secrets `journal-secrets`/`journal-db` | el deploy no toca material sensible: las credenciales las baja el init container de cada pod, con el rol de servicio de la app |
-| 5 | `sed` de `__PUBLIC_IP__` y `__ACME_EMAIL__` en `k8s/caddy.yaml` + `kubectl apply` de `postgresql.yaml`, `service.yaml` y `caddy.yaml` + espera Postgres | la IP la resuelve el nodo por IMDSv2 y el email viene de SSM: ninguno de los dos está hardcodeado |
+| 5 | `sed` de `__PUBLIC_IP__` y `__ACME_EMAIL__` en `k8s/caddy.yaml`, más el `sha256` del manifiesto renderizado en el placeholder `__CADDY_CHECKSUM__` + `kubectl apply` de `postgresql.yaml`, `service.yaml` y `caddy.yaml` + espera Postgres | la IP la resuelve el nodo por IMDSv2 y el email viene de SSM: ninguno de los dos está hardcodeado. El checksum es lo que hace que un cambio del Caddyfile **llegue** a Caddy (Kubernetes actualiza el ConfigMap en el volumen, pero Caddy no lo relee: ver [security.md §7](security.md#un-cambio-en-el-configmap-de-caddy-no-llega-al-proceso-que-lo-lee)) |
 | 6 | `kubectl exec -i deploy/postgres -- psql ... < database_setup.sql` | esquema idempotente en cada deploy |
 | 7 | `sed s|journal-api:placeholder|journal-api:<sha>|` + `kubectl apply` + `rollout status deployment/journal-api` | imagen exacta del commit, con timeout de 240 s |
 

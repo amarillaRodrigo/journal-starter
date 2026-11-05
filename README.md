@@ -174,12 +174,20 @@ Deployment, operación y diagnóstico del entorno desplegado:
   logs, dashboard, alarmas y costos.
 - [Seguridad del plano de control](docs/security.md): CloudTrail, alarmas de
   seguridad, detección de amenazas con AWS Config y CodeQL.
+- [Aislamiento de la red](docs/network-isolation.md): qué está realmente
+  aislado en la VPC y qué no — incluye la desviación documentada del ítem
+  "base de datos en subnet privada".
 - [Runbook de incidentes](docs/incident-response.md): qué hacer si se filtra
   una credencial — rotar, verificar acceso no autorizado y notificar.
 - [Runbook de producción](docs/runbook.md): troubleshooting de pipeline, pods,
   TLS, métricas, logs, alarmas y disco (todo por SSM; el puerto 22 está cerrado).
 - [Evidencia de seguridad](docs/evidence-security-incident-response.md):
   verificación end-to-end del bloque de monitoreo y respuesta a incidentes.
+- [Procedimiento de limpieza](docs/cleanup.md): cómo desmontar todo lo
+  desplegado en la cuenta, en orden y con sus bloqueos. **Escrito y no
+  ejecutado**: el `destroy` requiere confirmación explícita.
+- [Retrospectiva](docs/retrospective.md): qué se implementó, qué se haría
+  distinto y los aprendizajes del bloque de seguridad.
 
 ## License
 
