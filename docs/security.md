@@ -116,6 +116,60 @@ nombre del evento", que ya no matchea.
 el evento `PutMetricFilter` se cuenta a sí mismo y la alarma dispara una
 vez. Es ruido de setup, no un incidente.
 
+### El filtro de secretos se disparaba a sí mismo (corregido)
+
+El 2026-11-05, con la alarma `journal-api-security-secret-read` en
+`ALARM` y sin ninguna lectura de secretos en el trail, la pregunta
+obligatoria es la misma que manda el runbook: **buscar en el trail quién
+leyó los secretos**. Y esa búsqueda es la que había disparado la alarma.
+
+El motivo: el patrón del filtro era
+
+```
+"GetSecretValue" "secretsmanager.amazonaws.com" IAMUser
+```
+
+y la llamada `aws logs filter-log-events --filter-pattern
+'"GetSecretValue" "secretsmanager.amazonaws.com"'` **lleva esos mismos
+términos en sus `requestParameters`**. CloudTrail registra el request, el
+`userIdentity.type` de quien investiga es `IAMUser`, y el evento matchea el
+patrón. O sea: la consulta que verifica accesos no autorizados dispara la
+alarma de accesos no autorizados.
+
+El evento que lo probó, taken del trail:
+
+```
+09:04:37  FilterLogEvents  source=logs.amazonaws.com
+principal=arn:aws:iam::607856468834:user/rodri-dev
+requestParameters={"filterPattern": "\"GetSecretValue\" \"secretsmanager.amazonaws.com\"", ...}
+```
+
+**El fix**: agregar `"secretId"` al patrón. El evento real de
+`GetSecretValue` siempre trae el `requestParameter` `secretId`; una llamada
+a Logs API no lo trae (trae `logGroupName`, `filterPattern`, `limit`).
+Verificado con `TestMetricFilter`:
+
+| Patrón | Evento real | Query de investigación | Lectura del rol |
+|---|---|---|---|
+| `"GetSecretValue" "secretsmanager.amazonaws.com" IAMUser` | matchea | **matchea** ❌ | no |
+| `"GetSecretValue" "secretsmanager.amazonaws.com" "secretId" IAMUser` | matchea | no matchea ✅ | no |
+
+Comprobado en vivo: la lectura real de un secreto por el IAMUser movió la
+métrica a 1 (la detección sigue funcionando) y la query de investigación
+no movió nada.
+
+> Los patrones JSON por campo (`{"$.eventName": [...]}`) seguirían siendo
+> la solución limpia, pero la API de CloudWatch Logs de esta cuenta los
+> rechaza con `InvalidParameterException` (verificado de nuevo el
+> 2026-11-05). Por eso el workaround es un término que solo aparece en el
+> evento real.
+
+> **La misma trampa aplica a los otros filtros**: cualquier query de Logs
+> API que mencione los dos términos del patrón (el nombre del evento y el
+> `eventSource`) dispara la alarma correspondiente. Las queries del runbook
+> no lo hacen, porque filtran por `eventName` y no mencionan el
+> `eventSource`.
+
 ### Por qué no EventBridge para el trail (y lo que se corrigió)
 
 Lo canónico en AWS sería EventBridge: una regla con patrón JSON sobre

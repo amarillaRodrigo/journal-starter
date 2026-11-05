@@ -158,6 +158,14 @@ aws logs start-query \
     | sort @timestamp desc | limit 50'
 ```
 
+> **These queries are safe to run**: they filter by `eventName` and do not
+> mention the `eventSource`, so they do not match the metric filters that
+> watch the trail. A search that mentions **both** the event name and the
+> event source would set off the alarm it is trying to investigate — that
+> was a real bug in the `secret-reads` filter, found on 2026-11-05 and
+> fixed by adding the `secretId` term (see
+> [security.md §2](security.md)).
+
 The same three questions are saved as queries in Terraform
 (`journal-api/audit-lectura-de-secretos`, `journal-api/audit-console-login`,
 `journal-api/audit-cambios-de-sg`) and can be run from the console under

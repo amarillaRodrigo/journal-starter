@@ -255,6 +255,31 @@ Se comprobó que el hallazgo es **vivo** (no un estado viejo): se creó una
 password policy, la regla pasó a `COMPLIANT`, se borró, y la regla volvió a
 `NON_COMPLIANT`. El estado original de la cuenta quedó restaurado.
 
+### El bug que encontró la captura de pantalla
+
+La alarma `journal-api-security-secret-read` entró en `ALARM` a las 09:05
+sin que nadie hubiera leído un secreto. La pregunta del runbook ("buscar
+en el trail quién leyó los secretos") llevaba a la respuesta:
+
+```
+09:04:37  FilterLogEvents  source=logs.amazonaws.com
+principal=arn:aws:iam::607856468834:user/rodri-dev
+requestParameters={"filterPattern": "\"GetSecretValue\" \"secretsmanager.amazonaws.com\"", ...}
+```
+
+**La query de investigación era la que disparaba la alarma**: el patrón
+del filtro (`"GetSecretValue" "secretsmanager.amazonaws.com" IAMUser`) está
+completo dentro de los `requestParameters` de la llamada, y el principal es
+un `IAMUser`.
+
+El fix (agregar `"secretId"` al patrón) se verificó con `TestMetricFilter`
+y en vivo:
+
+| Prueba | Antes | Después |
+|---|---|---|
+| Lectura real de un secreto por el IAMUser | detectada | detectada ✅ |
+| Query de investigación | **dispara la alarma** ❌ | no dispara ✅ |
+
 ### La cadena de notificación
 
 ```

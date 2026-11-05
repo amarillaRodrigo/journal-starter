@@ -488,7 +488,25 @@ resource "aws_cloudwatch_log_metric_filter" "secret_reads" {
   #   - una access key filtrada o un humano en la consola son "IAMUser".
   # Limitacion documentada: un atacante que reuse un session token de un
   # rol asumido no dispara esta alarma (para eso esta GuardDuty).
-  pattern = "\"GetSecretValue\" \"secretsmanager.amazonaws.com\" IAMUser"
+  #
+  # El termino "secretId" esta a proposito y es lo que hace que el filtro
+  # NO se auto-alimente. Sin el, la alarma se dispara sola cuando alguien
+  # INVESTIGA:
+  #
+  #   - el evento de la llamada "aws logs filter-log-events --filter-pattern
+  #     '\"GetSecretValue\" \"secretsmanager.amazonaws.com\"'" lleva esos dos
+  #     terminos en sus requestParameters, y el principal es un IAMUser
+  #     (el que investiga), asi que matchea el patron y la alarma suena.
+  #   - o sea: la consulta que manda el runbook para verificar accesos no
+  #     autorizados dispara la alarma de accesos no autorizados. Verificado
+  #     el 2026-11-05: la alarma "journal-api-security-secret-read" entro en
+  #     ALARM a las 09:05 por la propia query de investigacion.
+  #
+  # El evento real de GetSecretValue siempre trae el requestParameter
+  # "secretId", y una llamada a Logs API no lo trae (trae logGroupName,
+  # filterPattern, limit). Con "secretId" en el patron, el evento real
+  # matchea y la query de investigacion no.
+  pattern = "\"GetSecretValue\" \"secretsmanager.amazonaws.com\" \"secretId\" IAMUser"
 
   metric_transformation {
     name          = "SecretReads"
