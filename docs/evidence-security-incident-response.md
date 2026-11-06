@@ -2,8 +2,10 @@
 
 Fecha: 2026-11-05
 Cuenta: `607856468834` (us-east-1)
-Repos: `amarillaRodrigo/journal-starter` (el fork) y
-`amarillaRodrigo/journal-starter-pipeline` (donde corre el pipeline)
+Repos: `amarillaRodrigo/journal-starter` (repo standalone, donde corre el
+pipeline), `amarillaRodrigo/journal-starter-pipeline` (espejo) y
+`amarillaRodrigo/journal-starter-fork` (el fork original, archivado: su
+organización de origen tiene Actions deshabilitado y lo hereda)
 
 Este documento es la evidencia de verificación del bloque *Cloud Monitoring
 Overview* del currículum. Cada ítem dice **qué se chequeó, cómo y qué
@@ -472,17 +474,19 @@ CodeQL   completed  success   a3f5c1f
 CI       completed  success   a3f5c1f
 ```
 
-El workflow está commiteado en los dos repositorios, pero **en el fork no
-corre**:
+El workflow está commiteado en los tres repositorios, pero **en el fork
+archivado no corre**:
 
 ```bash
-gh workflow run verify-capstone.yml --repo amarillaRodrigo/journal-starter
+gh workflow run verify-capstone.yml --repo amarillaRodrigo/journal-starter-fork
 # HTTP 422: Actions has been disabled for this repository
 ```
 
 El fork hereda la desactivación de Actions del repositorio de origen
-(`learntocloud/journal-starter`), que es de otra organización. El pipeline
-entero vive en `journal-starter-pipeline`, que es un repositorio normal.
+(`learntocloud/journal-starter`), que es de otra organización. Por eso el
+pipeline vive hoy en `amarillaRodrigo/journal-starter` (repo standalone con
+el mismo historial) y en `journal-starter-pipeline`, que es un repositorio
+normal.
 
 ### Los hallazgos y su triaje
 
@@ -532,7 +536,7 @@ mismo.
 |---|---|---|
 | GuardDuty | `SubscriptionRequiredException`: la cuenta no tiene método de pago, y **no se va a agregar** (decisión: todo free tier) | IaC lista y probada en `terraform/security.tf` detrás de `enable_guardduty`; la alarma existe. AWS Config cubre el rol de threat detection. |
 | Evento de conformidad de AWS Config | AWS Config no lo publica en esta cuenta (verificado con captura directa) | La alerta se hace sobre el evento que sí llega; el estado de conformidad se consulta por API. |
-| Que las alarmas corran en el fork | El repositorio de origen tiene Actions deshabilitado y el fork lo hereda | El pipeline vive en `journal-starter-pipeline`; el fork tiene el mismo código y los mismos workflows. |
+| Que las alarmas corran en el fork | El repositorio de origen tiene Actions deshabilitado y el fork lo hereda | El pipeline vive en `amarillaRodrigo/journal-starter` (standalone) y en `journal-starter-pipeline`; el fork quedó archivado como `journal-starter-fork`, con el mismo código y los mismos workflows. |
 | Migrar las alarmas del trail a EventBridge | No es un bloqueo: es que los metric filters ya están verificados end-to-end | Las reglas de EventBridge funcionan (verificado por captura directa); la migración queda como mejora pendiente. |
 | El MFA en Terraform | El seed TOTP es una credencial y no puede vivir en un repo | Procedimiento manual documentado en [security.md §4.1](../security.md); el seed quedó en `~/.aws/`. |
 

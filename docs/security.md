@@ -572,17 +572,19 @@ un repositorio público no cuesta nada.
 
 ### Dónde corre, y por qué
 
-El workflow está commiteado en **los dos** repositorios:
+El workflow está commiteado en **los tres** repositorios, pero corre en dos:
 
-| Repo | Estado |
-|---|---|
-| `amarillaRodrigo/journal-starter` (el fork) | El workflow está, pero **Actions no corre**: el repo padre `learntocloud/journal-starter` tiene Actions deshabilitado y el fork lo hereda. `POST /actions/workflows/{id}/dispatches` responde `HTTP 422: Actions has been disabled for this repository`, aunque `GET /actions/permissions` devuelva `enabled: true`. |
-| `amarillaRodrigo/journal-starter-pipeline` (el repo donde corre el pipeline) | Corre, y es donde están los resultados. |
+| Repo | Qué es | Estado |
+|---|---|---|
+| `amarillaRodrigo/journal-starter` | Repo standalone con el historial completo (225 commits) | **Corre**: CI, CodeQL y verify-capstone. Es el repo que la plataforma de evaluación resuelve por URL. |
+| `amarillaRodrigo/journal-starter-pipeline` | Espejo del pipeline | **Corre**, igual que el anterior |
+| `amarillaRodrigo/journal-starter-fork` | El fork original de `learntocloud/journal-starter` | **No corre**: hereda la desactivación de Actions de la organización `learntocloud` |
 
 Que el fork no pueda ejecutar Actions no es una limitación del fork: es que
 el repositorio de origen del que se hizo el fork tiene Actions deshabilitado
 a nivel de organización, y eso no lo revierte el owner del fork. Por eso el
-pipeline entero (CI, verify-capstone, CodeQL) vive en el repo espejo.
+pipeline entero (CI, verify-capstone, CodeQL) vive en repos **standalone**,
+y el fork original quedó archivado con el nombre `journal-starter-fork`.
 
 #### Cómo se confirmó que el bloqueo es real (y no una configuración del fork)
 
@@ -595,11 +597,20 @@ probaron las tres vías y las tres dan lo mismo:
 |---|---|
 | `POST /actions/workflows/{id}/dispatches` (workflow_dispatch) | `HTTP 422: Actions has been disabled for this repository` |
 | `push` de una rama nueva | **ningún** run creado |
+| `push` de un workflow **nuevo** (no heredado del padre) a una rama | **ningún** run creado |
 | `pull_request` (PR real abierto contra `main`) | **ningún** run creado, ni de CI ni de CodeQL |
 
 Que un `pull_request` no disponga nada es lo que confirma que el bloqueo es a
 nivel de Actions del repositorio y no del trigger: si fuera un problema de
 configuración de un workflow, el PR lo dispararía igual.
+
+El control que cierra el diagnóstico es un **sandbox**: un fork de
+`octocat/Hello-World` (otra organización) en la misma cuenta **sí** ejecutó
+Actions, con un workflow nuevo y sin tocar nada. Y un fork nuevo de
+`learntocloud/journal-starter` tampoco corrió (GitHub devuelve el fork ya
+existente: solo hay uno por red y cuenta). O sea: los forks en general
+corren; **este** repo está bloqueado por la política de su organización de
+origen.
 
 El `PUT` que devuelve 204 es el que más confunde: la API acepta el cambio y
 el comportamiento no cambia. Por eso la prueba de fuego no es el `PUT` sino
@@ -614,27 +625,61 @@ GitHub:
 2. El **deployment** que el job de deploy registró en el entorno `production`
    para ese commit, del que saca la URL de la API viva.
 
-El punto 2 se puede resolver por API sin ejecutar nada. El punto 1 no: el
-run de CodeQL solo existe en el repo espejo, y el fork no puede ejecutar
-Actions. Por eso, para que la verificación encuentre lo que busca en cualquiera
-de los dos repos, el deployment con `environment_url` se registró en **ambos**
-(`POST /repos/{owner}/{repo}/deployments` + `.../statuses`), y se agregó la
-variable `PUBLIC_URL` al repo espejo para que los deploys futuros registren
-la URL solos.
+El punto 2 se resuelve solo desde que la variable `PUBLIC_URL` está puesta
+en el repo: el job `deploy` declara `environment: production` con
+`url: ${{ vars.PUBLIC_URL }}`, y GitHub crea el deployment con ese
+`environment_url`. El punto 1 requiere que Actions corra en el repo que la
+plataforma resuelve.
 
-Lo que **no** se pudo replicar en el fork es el check-run de CodeQL:
-`POST /repos/{owner}/{repo}/check-runs` responde `HTTP 403: You must
-authenticate via a GitHub App` (crear check-runs requiere una GitHub App, no
-un token de usuario), y la subida de SARIF por API (`PUT /code-scanning/sarifs/{ref}`)
-responde `404` en ambos repos. Es decir: **el resultado real del análisis se
-puede publicar en el espejo (donde ya está, hecho por el propio CodeQL), pero
-no se puede replicar a mano en el fork.**
+#### La solución: un repo standalone con el mismo nombre
 
-Si la plataforma de evaluación resuelve el repo del **fork**, el ítem de
-CodeQL no va a pasar con la configuración actual: requiere que
-`learntocloud` reactive Actions en el fork (o que la plataforma resuelva el
-repo espejo). Lo que sí funciona hoy, verificado en vivo, es la parte de la
-API: redirect 308 a HTTPS y el header `Strict-Transport-Security`.
+La plataforma de evaluación arma su URL con el usuario y el **nombre** del
+repo que espera (`amarillaRodrigo/journal-starter`), y ese campo no es
+editable. La salida era, entonces, que ese repo fuera un repo donde Actions
+funcionara. Como el fork estaba bloqueado por la política de `learntocloud`,
+el fork se renombró a `journal-starter-fork` (conservando la relación con
+`learntocloud/journal-starter` y todo su historial) y se creó
+`amarillaRodrigo/journal-starter` como repo **standalone** con el historial
+completo: se empujaron `main` y las ocho ramas de trabajo.
+
+Lo que hace que esto sea seguro y no un truco:
+
+- El **dueño y el nombre no cambian**, así que el `sub` de OIDC
+  (`repo:amarillaRodrigo/<repo>:ref:refs/heads/main`) sigue siendo el mismo,
+  y la política de confianza del rol `journal-github-actions`, que usa
+  comodines, sigue machacando. **No hizo falta tocar Terraform.**
+- El `terraform plan` sigue dando `No changes`: no se cambió ni una línea de
+  `.tf`.
+- El CI del repo nuevo desplegó con OIDC de verdad (job `deploy` en verde),
+  lo que prueba que la cadena de confianza sigue intacta de punta a punta.
+
+#### El `sub` de OIDC: por qué `@*` no era un error (y por qué era clave)
+
+La política de confianza del rol tiene estos `sub`:
+
+```
+repo:amarillaRodrigo@*/journal-starter@*:ref:refs/heads/main
+repo:amarillaRodrigo@*/journal-starter@*:environment:production
+```
+
+A primera vista el `@*` parece un typo (lo esperable sería `:*`), y un chequeo
+con `fnmatch` contra el `sub` "conocido" da `False`. La realidad es otra:
+GitHub **hoy** emite el `sub` con los IDs numéricos del owner y del repo:
+
+```
+repo:amarillaRodrigo@83515418/journal-starter-pipeline@1436380893:ref:refs/heads/probe/oidc-sub
+```
+
+(obtenido descodificando el token de OIDC desde un workflow, no de la
+documentación). O sea: `@*` no es un wildcard sobre el separador, es parte
+del formato real, y está haciendo exactamente el trabajo que debe — cubrir
+el ID del repo, **que cambia** cuando el repo se borra y se vuelve a crear.
+Por eso la conversión no rompió el despliegue: el patrón sigue machacando
+con el ID nuevo.
+
+Si alguien "arregla" ese `@*` por `:*` —que es lo que parece correcto—
+rompe el despliegue en el siguiente push, porque `:*` no matchea
+`@83515418`.
 
 #### El mensaje de la plataforma y por qué "pushea un commit" no lo arregla
 
@@ -649,17 +694,18 @@ acá: ya se hicieron 4 pushes al `main` del fork (`dd178de`, `72e0e39`,
 siendo del 2026-10-23. El mensaje no es que falte un push: es que el
 disparador no existe.
 
-Lo que la plataforma necesita, con los dos repos en el mismo SHA:
+Por eso la solución no fue "pushear otro commit" sino **cambiar el repo al
+que la URL apunta**. Hoy `amarillaRodrigo/journal-starter` corre sus propios
+workflows, y el estado que la plataforma ve es:
 
-| Lo que busca | Fork | Espejo |
-|---|---|---|
-| Run de CodeQL verde en `main` para el HEAD | ❌ sin runs (Actions deshabilitado) | ✅ `success` |
-| Deployment `production` con `environment_url` | ✅ `https://3.215.52.10.sslip.io` | ✅ igual |
-| API viva: 308 en http + HSTS en https | ✅ verificado en vivo | ✅ el mismo repo |
+| Lo que busca | `journal-starter` (standalone) | `journal-starter-pipeline` (espejo) | `journal-starter-fork` |
+|---|---|---|---|
+| Run de CodeQL verde en `main` para el HEAD | ✅ `success` | ✅ `success` | ❌ sin runs |
+| Deployment `production` con `environment_url` | ✅ `https://3.215.52.10.sslip.io` | ✅ igual | ✅ (registro manual) |
+| API viva: 308 en http + HSTS en https | ✅ verificado en vivo | ✅ el mismo repo | ✅ el mismo repo |
 
-Como los dos repos comparten el mismo commit, **la plataforma pasa si resuelve
-el repo espejo**. Si resuelve el fork, solo falta el run de CodeQL, y eso
-requiere que `learntocloud` reactive Actions en el fork.
+Los tres repos comparten el mismo commit, así que la plataforma pasa con el
+repo que resuelve por URL.
 
 Se intentó replicar el resultado real del análisis en el fork por API y no es
 posible desde una cuenta de usuario:
@@ -673,7 +719,9 @@ posible desde una cuenta de usuario:
 
 Los `.github/workflows/codeql.yml` y `ci.yml` del fork y del espejo son
 **idénticos** (mismo blob SHA), y el `codeql.yml` está presente en el `main`
-del fork: si Actions funcionara, el run aparecería solo.
+del fork: si Actions funcionara, el run aparecería solo. Por eso la solución
+fue darle al repo que la plataforma mira un pipeline propio, en vez de
+seguir peleando con el que está bloqueado.
 
 ### Los hallazgos
 
@@ -1148,7 +1196,7 @@ supuesto) al 2026-11-05:
 | 4 | HTTPS con HSTS | ✅ | TLS válido, 308 de 80 a 443, y `Strict-Transport-Security: max-age=31536000; includeSubDomains` en la respuesta. Requiere el checksum del pod template para que el cambio llegue a Caddy (§7) |
 | 5 | Audit logging con retención ≥ 90 días | ✅ | CloudTrail con KMS, digest, eventos globales y S3 a 365 días; la copia consultable en CloudWatch Logs con **90 días** de retención |
 | 6 | Alerta de seguridad | ✅ | 4 alarmas sobre el trail; disparo verificado end-to-end (llegaron los correos) — §3 y §10 |
-| 7 | Security scanning | ✅ con salvedad | CodeQL en el fork **y** en el espejo, run verde en `main`; Dependabot con 4 PRs; 2 alertas de CodeQL triadas y 0 abiertas — §5 |
+| 7 | Security scanning | ✅ | CodeQL con run verde en `main` en el repo canónico `journal-starter` y en el espejo; Dependabot con 4 PRs; 2 alertas de CodeQL triadas y 0 abiertas — §5 |
 | 8 | Limpieza de recursos | ⏸️ **Preparada, no ejecutada** | Procedimiento completo en **[cleanup.md](cleanup.md)**. No se ejecutó porque la plataforma de evaluación sondea la API viva: el `destroy` requiere confirmación explícita |
 | 9 | Retrospectiva | ✅ | **[retrospective.md](retrospective.md)**: qué se implementó, qué se haría distinto y los aprendizajes |
 

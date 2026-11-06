@@ -454,7 +454,8 @@ terraform plan -no-color
 - [ ] KMS: verificación de la ventana de 30 días, o acelerado a 7 días.
 - [ ] Restos de §4 (subscriptions, topics, colas) borrados.
 - [ ] Verificación final de §6: todo vacío.
-- [ ] Los presets de GitHub (repo del fork y repo espejo) quedan sin tocar: son
+- [ ] Los presets de GitHub (los tres repos: `journal-starter`,
+      `journal-starter-pipeline` y `journal-starter-fork`) quedan sin tocar: son
       del capstone, no de la cuenta de AWS. El pipeline dejará de funcionar
       solo, porque el rol de OIDC y el provider quedan destruidos.
 - [ ] Los presupuestos de AWS se borran con el destroy; los avisos de

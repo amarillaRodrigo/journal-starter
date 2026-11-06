@@ -327,16 +327,19 @@ Si los cuatro valores no coinciden, el diagnóstico está en
 
 ## 6. Runs de CI verificados
 
-> **Dónde corre el pipeline.** GitHub deshabilitó Actions en este fork del lado
+> **Dónde corre el pipeline.** GitHub deshabilitó Actions en el fork del lado
 > de su plataforma: `GET /actions/permissions` sigue respondiendo
 > `enabled: true`, `PUT .../actions/permissions` devuelve `204` y aun así todo
 > trigger falla con `HTTP 422 "Actions has been disabled for this repository"`.
 > No es un ajuste del repo ni de la cuenta —un repo nuevo en la misma cuenta
-> con los mismos workflows corre normal—, así que el pipeline se ejecuta en el
-> repo espejo [`journal-starter-pipeline`](https://github.com/amarillaRodrigo/journal-starter-pipeline),
-> que tiene el mismo historial. El fork sigue siendo el remoto canónico y los
-> runs de esta tabla son suyos; los nuevos quedan en el espejo.
-> `scripts/push-release.sh` publica en ambos con un solo comando.
+> con los mismos workflows corre normal—, así que el fork original se renombró
+> a [`journal-starter-fork`](https://github.com/amarillaRodrigo/journal-starter-fork)
+> y el pipeline corre hoy en
+> [`amarillaRodrigo/journal-starter`](https://github.com/amarillaRodrigo/journal-starter),
+> un repo standalone con el mismo historial, y en el espejo
+> [`journal-starter-pipeline`](https://github.com/amarillaRodrigo/journal-starter-pipeline).
+> Los tres repos comparten el mismo commit; `scripts/push-release.sh` publica
+> en los dos que corren con un solo comando.
 
 | Fecha (UTC) | Commit | Run ID | `test` | `build` | `deploy` | Nota |
 |---|---|---|---|---|---|---|

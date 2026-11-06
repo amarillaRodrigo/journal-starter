@@ -4,8 +4,9 @@ Cierre del bloque de **seguridad del capstone** (Learn to Cloud, Fase 3).
 
 Fecha: 2026-11-05
 Cuenta: `607856468834` (us-east-1)
-Repos: `amarillaRodrigo/journal-starter` (fork canónico) y
-`amarillaRodrigo/journal-starter-pipeline` (espejo, donde corre el pipeline)
+Repos: `amarillaRodrigo/journal-starter` (repo standalone, canónico),
+`amarillaRodrigo/journal-starter-pipeline` (espejo) y
+`amarillaRodrigo/journal-starter-fork` (el fork original, archivado)
 
 ---
 
@@ -346,6 +347,49 @@ mucho más**: un atacante que compromete el nodo igual llega a Postgres por la
 red de pods. Lo que realmente protege los datos es que **la password no esté
 en el pod**. La subnet privada es la segunda capa; esa es la primera.
 
+### 4.4 El `sub` de OIDC con IDs dentro, y el fork que no podía correr Actions
+
+Dos cosas que parecían errores y eran decisiones del otro lado.
+
+**El `sub` con IDs.** La política de confianza del rol `journal-github-actions`
+tiene `repo:amarillaRodrigo@*/journal-starter@*:ref:refs/heads/main`. El `@*`
+parece un typo —lo esperable sería `:*`— y un `fnmatch` contra el `sub`
+"conocido" da `False`. La realidad es otra: GitHub **hoy** emite el `sub` con
+los IDs numéricos del owner y del repo:
+
+```
+repo:amarillaRodrigo@83515418/journal-starter-pipeline@1436380893:ref:refs/heads/probe/oidc-sub
+```
+
+y se comprobó descodificando el token de OIDC desde un workflow, no leyendo la
+documentación. El `@*` no es un wildcard sobre el separador: es el formato real,
+y cubre el ID del repo, que **cambia** cuando el repo se borra y se recrea.
+
+La consecuencia práctica es la que importa: "arreglar" ese `@*` por `:*` —que es
+lo que parece correcto— rompe el despliegue en el siguiente push. Un wildcard
+que parecía mal escrito era lo que hacía que todo funcionara, y "corregirlo"
+habría sido el bug.
+
+**El fork que no corría.** El fork de `learntocloud/journal-starter` no podía
+ejecutar ningún workflow: `GET /actions/permissions` decía `enabled: true`, `PUT`
+devolvía `204`, y todo trigger fallaba con `422: Actions has been disabled for
+this repository`. Se probaron `workflow_dispatch`, `push` a una rama nueva, un
+workflow **nuevo** (no heredado) y un PR real: ninguno creó un run. El control
+fue un fork de otra organización en la misma cuenta, que **sí** corrió: el
+bloqueo era de ese repo, no de los forks en general.
+
+La salida fue renombrar el fork a `journal-starter-fork` (conservando su
+relación con `learntocloud` y todo su historial) y crear
+`amarillaRodrigo/journal-starter` como repo standalone con el mismo historial.
+Como el dueño y el nombre no cambian, el `sub` de OIDC no cambia, la política de
+confianza sigue machacando y **no hubo que tocar Terraform**: el `plan` siguió
+dando `No changes` y el CI del repo nuevo desplegó con OIDC de verdad.
+
+**La lección:** cuando algo parece estar mal en tu código, la primera pregunta es
+si está mal en tu código. Y cuando la respuesta es "no, está en el formato que
+cambió solo" o "está en el del otro", la salida no es pelear con el síntoma: es
+mover lo tuyo a donde el síntoma no aplica.
+
 ---
 
 ## 5. Lo que queda
@@ -357,6 +401,7 @@ en el pod**. La subnet privada es la segunda capa; esa es la primera.
 | Activar GuardDuty | Requiere método de pago | `terraform/security.tf` (flag `enable_guardduty`) |
 | Migrar las alertas a EventBridge | Pendiente: el trail **sí** entrega a EventBridge (el diagnóstico anterior era falso) | `docs/security.md` §7 |
 | Migrar la base a RDS y el ingress a un ALB | Fuera del free tier | `docs/network-isolation.md` §5 |
+| El fork archivado `journal-starter-fork` | **Sin acción**: se conserva a propósito, por trazabilidad | `docs/security.md` §5 |
 
 ---
 
