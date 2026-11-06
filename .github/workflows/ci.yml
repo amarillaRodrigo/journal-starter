@@ -71,7 +71,7 @@ jobs:
           ./gitleaks detect --source . --redact --no-banner --verbose --exit-code 1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
