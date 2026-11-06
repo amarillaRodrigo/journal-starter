@@ -55,7 +55,7 @@ jobs:
       OTEL_SDK_DISABLED: "true"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # gitleaks revisa el historial completo, no solo el ultimo commit:
           # un secreto filtrado sigue vivo en el historial aunque se borre.
@@ -105,7 +105,7 @@ jobs:
       id-token: write # OIDC: credenciales efímeras, sin secretos estáticos
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
