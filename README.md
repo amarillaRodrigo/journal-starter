@@ -11,9 +11,10 @@
 > [docs/cleanup.md](docs/cleanup.md) §8.
 >
 > **El CI queda en rojo a propósito después del desmontaje**: el job `build`
-> falla al no existir el repo de ECR y el `deploy` al no existir la instancia.
-> Eso no es un pipeline roto: es la señal de que hay que aplicar la IaC
-> primero. El job `test` sigue pasando.
+> falla en su primer paso al no existir ya el rol de OIDC (`Could not assume
+> role with OIDC`), y el `deploy` queda `skipped`. Eso no es un pipeline roto:
+> es la señal de que hay que aplicar la IaC primero. El job `test` sigue
+> pasando, y CodeQL también: no dependen de AWS.
 
 Welcome to [Learn to Cloud's](https://learntocloud.com) Phase 3 capstone. You will be guided to building a journal API with **FastAPI**, **PostgreSQL**, structured logging, input validation, and AI-powered entry analysis.
 

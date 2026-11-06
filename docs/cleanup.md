@@ -319,6 +319,7 @@ Inventario **después** del destroy, con lo que realmente quedó:
 | 1 suscripción `PendingConfirmation` a `journal-api-scratch-policy-test` | prueba de policy con un endpoint `nobody@example.com` | se borró el topic; el registro de la suscripción queda colgado (AWS no expone API para borrar una suscripción sin confirmar) y lo limpia solo en ~3 días |
 | 2 parámetros SSM: `/journal-api/OPENAI_BASE_URL` y `/journal-api/OPENAI_MODEL` | los creó el deploy a mano, no Terraform | `aws ssm delete-parameter --name <n>` |
 | 2 presupuestos: `journal-capstone-budget` y `My Zero-Spend Budget` | **no estaban en Terraform**: el `destroy` no los toca | `aws budgets delete-budget --budget-name <n>` |
+| 1 rol + 1 instance profile de SSM (`linux-ctfs-ssm-us-east-1-*`) | el agente SSM los crea solo al registrar una instancia como nodo gestionado; no estaban en Terraform | quitar el rol del instance profile, borrar el profile y luego el rol |
 
 Los topics de debug que se habían creado en la tanda de diagnóstico:
 
@@ -539,7 +540,7 @@ Todo verificado con las mismas APIs, después del destroy:
 | Topics SNS | ninguno |
 | Suscripciones SNS | solo 1 `PendingConfirmation` colgada (la limpia AWS sola, §4.1) |
 | Colas SQS | ninguna |
-| IAM roles del proyecto | ninguno (tampoco el `journal-ssm-role`, ni el perfil de instancia, ni el OIDC provider de GitHub) |
+| IAM roles del proyecto | ninguno (tampoco el `journal-ssm-role`, ni el perfil de instancia, ni el OIDC provider de GitHub, ni el rol y el instance profile que creó el agente SSM) |
 | ECR | ningún repo |
 | AWS Config | sin recorder, 0 reglas |
 | SSM parameters | ninguno |
@@ -569,8 +570,9 @@ Todo verificado con las mismas APIs, después del destroy:
 - [x] Secretos borrados sin ventana de recuperación (`--force-delete-without-recovery`).
 - [x] KMS: verificación de la ventana de 30 días, o acelerado a 7 días.
 - [x] Restos de §4 borrados: 4 suscripciones SNS confirmadas, 2 parámetros
-      SSM y 2 presupuestos. Queda 1 suscripción `PendingConfirmation` sin
-      borrar (la limpia AWS sola, §4.1).
+      SSM, 2 presupuestos y el rol + instance profile que creó el agente
+      SSM. Queda 1 suscripción `PendingConfirmation` sin borrar (la limpia
+      AWS sola, §4.1).
 - [x] Verificación final de §6: todo vacío (§6.1).
 - [x] Los presets de GitHub (los tres repos: `journal-starter`,
       `journal-starter-pipeline` y `journal-starter-fork`) quedan sin tocar: son
@@ -597,7 +599,7 @@ Todo verificado con las mismas APIs, después del destroy:
 | 7 | `terraform destroy` (1ª pasada) | destruyó 98, **falló en ECR** (`RepositoryNotEmptyException`) |
 | 8 | `batch_delete_image` | 66 imágenes borradas, 0 restantes |
 | 9 | `terraform destroy` (2ª pasada) | `Destroy complete! Resources: 1 destroyed.` |
-| 10 | Restos de §4 | 4 suscripciones SNS, 2 parámetros SSM, 2 presupuestos |
+| 10 | Restos de §4 | 4 suscripciones SNS, 2 parámetros SSM, 2 presupuestos, 1 rol + 1 instance profile de SSM |
 | 11 | Secretos | purgados con `--force-delete-without-recovery` |
 | 12 | Verificación (§6.1) | todo vacío salvo la clave KMS en `PendingDeletion` y 1 suscripción pendiente |
 
@@ -612,8 +614,18 @@ Todo verificado con las mismas APIs, después del destroy:
   purga sola en ~3 días. No se factura.
 
 **Efecto colateral esperado: el CI queda en rojo.** El pipeline despliega a
-AWS, y a AWS ya no hay a qué desplegar: el job `build` falla al no existir el
-repo de ECR y el `deploy` al no existir la instancia. Eso no es un pipeline
+AWS, y a AWS ya no hay a qué desplegar. Medido el 2026-11-06 sobre el commit
+`b88a736`:
+
+```
+job test     completed  success
+job build    completed  failure   -> Could not assume role with OIDC
+job deploy   completed  skipped
+```
+
+El `build` falla en su **primer** paso, porque el rol `journal-github-actions`
+y el OIDC provider ya no existen (los destruyó el `destroy`); si existieran,
+fallaría después en el push a ECR, que tampoco existe. Eso no es un pipeline
 roto: es la señal de que hay que correr `terraform apply` antes de empujar.
 El job `test` sigue pasando, y CodeQL también: no dependen de AWS.
 
