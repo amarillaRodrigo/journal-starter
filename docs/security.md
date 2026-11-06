@@ -584,6 +584,58 @@ el repositorio de origen del que se hizo el fork tiene Actions deshabilitado
 a nivel de organización, y eso no lo revierte el owner del fork. Por eso el
 pipeline entero (CI, verify-capstone, CodeQL) vive en el repo espejo.
 
+#### Cómo se confirmó que el bloqueo es real (y no una configuración del fork)
+
+El síntoma es engañoso: `GET /repos/{fork}/actions/permissions` devuelve
+`enabled: true` y `PUT` con `{"enabled": true, "allowed_actions": "all"}`
+devuelve **204**. Parece que se arregló, pero ningún trigger dispara. Se
+probaron las tres vías y las tres dan lo mismo:
+
+| Vía | Resultado |
+|---|---|
+| `POST /actions/workflows/{id}/dispatches` (workflow_dispatch) | `HTTP 422: Actions has been disabled for this repository` |
+| `push` de una rama nueva | **ningún** run creado |
+| `pull_request` (PR real abierto contra `main`) | **ningún** run creado, ni de CI ni de CodeQL |
+
+Que un `pull_request` no disponga nada es lo que confirma que el bloqueo es a
+nivel de Actions del repositorio y no del trigger: si fuera un problema de
+configuración de un workflow, el PR lo dispararía igual.
+
+El `PUT` que devuelve 204 es el que más confunde: la API acepta el cambio y
+el comportamiento no cambia. Por eso la prueba de fuego no es el `PUT` sino
+un trigger real.
+
+#### Consecuencia práctica: el `deployment` del entorno `production`
+
+La verificación de la plataforma de evaluación necesita dos cosas del lado de
+GitHub:
+
+1. Un run de CodeQL verde en `main` para el commit actual.
+2. El **deployment** que el job de deploy registró en el entorno `production`
+   para ese commit, del que saca la URL de la API viva.
+
+El punto 2 se puede resolver por API sin ejecutar nada. El punto 1 no: el
+run de CodeQL solo existe en el repo espejo, y el fork no puede ejecutar
+Actions. Por eso, para que la verificación encuentre lo que busca en cualquiera
+de los dos repos, el deployment con `environment_url` se registró en **ambos**
+(`POST /repos/{owner}/{repo}/deployments` + `.../statuses`), y se agregó la
+variable `PUBLIC_URL` al repo espejo para que los deploys futuros registren
+la URL solos.
+
+Lo que **no** se pudo replicar en el fork es el check-run de CodeQL:
+`POST /repos/{owner}/{repo}/check-runs` responde `HTTP 403: You must
+authenticate via a GitHub App` (crear check-runs requiere una GitHub App, no
+un token de usuario), y la subida de SARIF por API (`PUT /code-scanning/sarifs/{ref}`)
+responde `404` en ambos repos. Es decir: **el resultado real del análisis se
+puede publicar en el espejo (donde ya está, hecho por el propio CodeQL), pero
+no se puede replicar a mano en el fork.**
+
+Si la plataforma de evaluación resuelve el repo del **fork**, el ítem de
+CodeQL no va a pasar con la configuración actual: requiere que
+`learntocloud` reactive Actions en el fork (o que la plataforma resuelva el
+repo espejo). Lo que sí funciona hoy, verificado en vivo, es la parte de la
+API: redirect 308 a HTTPS y el header `Strict-Transport-Security`.
+
 ### Los hallazgos
 
 El primer análisis encontró **2 alertas de severidad alta** en
