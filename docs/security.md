@@ -636,6 +636,45 @@ CodeQL no va a pasar con la configuración actual: requiere que
 repo espejo). Lo que sí funciona hoy, verificado en vivo, es la parte de la
 API: redirect 308 a HTTPS y el header `Strict-Transport-Security`.
 
+#### El mensaje de la plataforma y por qué "pushea un commit" no lo arregla
+
+La plataforma de evaluación responde:
+
+> No CodeQL runs found on the main branch. Push a commit to main (or run the
+> workflow) to trigger CodeQL, then try again.
+
+Ese consejo es correcto **para un repo donde Actions funciona**, y no aplica
+acá: ya se hicieron 4 pushes al `main` del fork (`dd178de`, `72e0e39`,
+`212fd8d`, `9ca7fdd`) y **ninguno** creó un run. El último run del fork sigue
+siendo del 2026-10-23. El mensaje no es que falte un push: es que el
+disparador no existe.
+
+Lo que la plataforma necesita, con los dos repos en el mismo SHA:
+
+| Lo que busca | Fork | Espejo |
+|---|---|---|
+| Run de CodeQL verde en `main` para el HEAD | ❌ sin runs (Actions deshabilitado) | ✅ `success` |
+| Deployment `production` con `environment_url` | ✅ `https://3.215.52.10.sslip.io` | ✅ igual |
+| API viva: 308 en http + HSTS en https | ✅ verificado en vivo | ✅ el mismo repo |
+
+Como los dos repos comparten el mismo commit, **la plataforma pasa si resuelve
+el repo espejo**. Si resuelve el fork, solo falta el run de CodeQL, y eso
+requiere que `learntocloud` reactive Actions en el fork.
+
+Se intentó replicar el resultado real del análisis en el fork por API y no es
+posible desde una cuenta de usuario:
+
+| Vía | Respuesta |
+|---|---|
+| `POST /repos/{fork}/check-runs` | `403: You must authenticate via a GitHub App` (también en el espejo: es el token, no el fork) |
+| `PUT /repos/{fork}/code-scanning/sarifs/{ref}` | `404` (también en el espejo) |
+| `PUT /repos/{fork}/actions/permissions` | `204`, pero **no cambia el comportamiento** (el bloqueo está por encima del repo) |
+| `PUT /repos/{learntocloud/journal-starter}/actions/permissions` | `403` — no es repo del usuario |
+
+Los `.github/workflows/codeql.yml` y `ci.yml` del fork y del espejo son
+**idénticos** (mismo blob SHA), y el `codeql.yml` está presente en el `main`
+del fork: si Actions funcionara, el run aparecería solo.
+
 ### Los hallazgos
 
 El primer análisis encontró **2 alertas de severidad alta** en
