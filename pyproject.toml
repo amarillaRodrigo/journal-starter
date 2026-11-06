@@ -20,7 +20,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
+    "pytest>=9.2.0",
     "pytest-asyncio",
     "ruff",
     "pyright",
