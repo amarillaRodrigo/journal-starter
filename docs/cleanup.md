@@ -4,16 +4,22 @@ Qué hay que hacer para **desmontar** todo lo que este capstone desplegó en la
 cuenta `607856468834` (us-east-1), sin dejar recursos huérfanos y sin romper
 las dependencias de AWS.
 
-> ## ⚠️ NO SE EJECUTÓ
+> ## ✅ EJECUTADO — 2026-11-06
 >
-> Este procedimiento está **escrito y verificado en seco**, pero **no se
-> ejecutó**. La plataforma de evaluación sondea la API viva, así que el
-> `terraform destroy` queda pendiente de una confirmación explícita del
-> responsable del proyecto.
+> Este procedimiento se ejecutó completo el **2026-11-06**, después de que la
+> verificación de la plataforma pasara y el responsable del proyecto lo
+> confirmara de forma explícita. Resultado: **99 recursos destruidos** por
+> Terraform (98 en la primera pasada + el repo de ECR en la segunda), los dos
+> buckets vaciados a mano (6107 versiones), 66 imágenes de ECR borradas, y los
+> restos que Terraform no conoce (§4) limpiados a mano.
+>
+> El registro completo de la ejecución está en
+> [§8](#8-registro-de-ejecución), con lo que se encontró y lo que no.
 >
 > Cada paso dice qué **verificar antes** de ejecutarlo. No se salta ninguno.
 
 Fecha de redacción: 2026-11-05
+Fecha de ejecución: 2026-11-06
 Alcance: **toda** la infraestructura del proyecto, en la cuenta `607856468834`.
 
 ---
@@ -38,10 +44,10 @@ Alcance: **toda** la infraestructura del proyecto, en la cuenta `607856468834`.
 | AWS Config | recorder, delivery channel, 13 reglas | |
 | Reglas de EventBridge | `journal-api-config-changes`, `journal-api-config-noncompliant` | |
 | IAM | roles, instance profile, OIDC provider de GitHub | |
-| ECR | repositorio `journal-api` | 11 imágenes |
+| ECR | repositorio `journal-api` | 68 imágenes: **el recurso no tiene `force_delete`**, así que las imágenes se borran antes (§3.4) |
 | Secrets Manager | `journal-api/credentials/{database,llm}` | 7 días de recovery window |
-| SSM | 3 parámetros de configuración | |
-| Presupuestos | 2 | |
+| SSM | `/journal-api/ACME_EMAIL` (en Terraform) + `/journal-api/OPENAI_BASE_URL` y `/journal-api/OPENAI_MODEL` (**fuera** de Terraform) | los dos últimos se borran a mano (§4) |
+| Presupuestos | `journal-capstone-budget` y `My Zero-Spend Budget` | **fuera de Terraform**: el destroy no los toca (§4) |
 | **Restos de diagnóstico** | topics SNS `journal-api-eb-debug-*`, `journal-api-eb-probe-*`, `journal-api-scratch-policy-test` | **no están en Terraform** (§4) |
 
 ---
@@ -138,13 +144,18 @@ El bucket de Config se vacía igual (tiene ~40 objetos de historial).
 
 ```bash
 aws s3api list-object-versions --bucket journal-api-audit-607856468834-us-east-1 \
-  --query 'length(Versions) + length(DeleteMarkers)' --output text
+  --query 'length(Versions)' --output text
 # debe devolver 0
 
 aws s3api list-object-versions --bucket journal-api-config-607856468834-us-east-1 \
-  --query 'length(Versions) + length(DeleteMarkers)' --output text
+  --query 'length(DeleteMarkers)' --output text
 # debe devolver 0
 ```
+
+> El comando con `length(Versions) + length(DeleteMarkers)` que aparece en
+> algunas versiones de este documento **no es válido**: JMESPath no tiene
+> `+` entre dos `length()`. Hay que hacer las dos cuentas por separado (o
+> usar Python).
 
 ### 3.2 El trail y el recorder escriben en sus buckets
 
@@ -254,6 +265,42 @@ aws kms schedule-key-deletion --key-id alias/journal-api-audit \
 > que tener claro es que **el destroy no es un borrado completo**: 30 días
 > después la clave recién desaparece.
 
+### 3.4 El repositorio de ECR no se puede borrar con imágenes dentro
+
+Este **no estaba en el documento original** y apareció al ejecutar el
+destroy: el recurso `aws_ecr_repository.journal_api` no tiene `force_delete`,
+as que AWS rechaza borrarlo mientras tenga imágenes:
+
+```
+Error: ECR Repository (journal-api) not empty, consider using force_delete:
+operation error ECR: DeleteRepository, ... RepositoryNotEmptyException
+```
+
+La diferencia con los buckets de S3 es que acá el problema no es el
+contenido sino el **número de versiones**: el repo tenía 68 imágenes (una
+por commit, más los tags `latest`), y AWS borra el repo vacío o nada.
+
+Solución: borrar las imágenes primero y dejar que Terraform borre el repo
+así (mantiene el repo en el estado, que es lo que da trazabilidad):
+
+```bash
+aws ecr list-images --repository-name journal-api
+aws ecr batch-delete-image --repository-name journal-api \
+  --image-ids imageDigest="$(...)" imageDigest="$(...)" ...
+# en la práctica, un script con paginación; medido el 2026-11-06:
+#   batch_delete_image -> 66 borradas, 0 fallos, 0 restantes
+```
+
+La alternativa sería poner `force_delete = true` en el recurso y que el
+`destroy` se llevase las imágenes, pero eso deja de lado la evidencia de qué
+se borró y obliga a un `apply` extra.
+
+> **El destroy no es atómico:** al fallar en ECR, Terraform había destruido
+> todo lo demás y había actualizado el estado con lo que sí se borró. La
+> segunda pasada del `destroy` terminó el trabajo (1 recurso). Por eso el
+> procedimiento tiene que ser reentrante: `terraform destroy` se puede
+> correr las veces que haga falta y sigue avanzando.
+
 ---
 
 ## 4. Lo que Terraform NO destruye
@@ -262,14 +309,18 @@ Estos recursos se crearon durante el diagnóstico de seguridad **fuera** de
 Terraform, así que sobreviven a un `terraform destroy`. Hay que borrarlos a
 mano.
 
-Verificado el 2026-11-05, después de limpiar los topics ya eliminados:
+### 4.1 Lo que se encontró el 2026-11-06
 
-```bash
-# Topics SNS de debug que quedaron (con sus suscripciones)
-aws sns list-topics --query 'Topics[].TopicArn' --output json
-```
+Inventario **después** del destroy, con lo que realmente quedó:
 
-Restos conocidos de esa tanda:
+| Sobró | Por qué | Cómo se borró |
+|---|---|---|
+| 4 suscripciones SNS confirmadas a topics `journal-api-eb-debug-*` | los topics ya no existían, pero las suscripciones quedan colgadas | `aws sns unsubscribe --subscription-arn <arn>` |
+| 1 suscripción `PendingConfirmation` a `journal-api-scratch-policy-test` | prueba de policy con un endpoint `nobody@example.com` | se borró el topic; el registro de la suscripción queda colgado (AWS no expone API para borrar una suscripción sin confirmar) y lo limpia solo en ~3 días |
+| 2 parámetros SSM: `/journal-api/OPENAI_BASE_URL` y `/journal-api/OPENAI_MODEL` | los creó el deploy a mano, no Terraform | `aws ssm delete-parameter --name <n>` |
+| 2 presupuestos: `journal-capstone-budget` y `My Zero-Spend Budget` | **no estaban en Terraform**: el `destroy` no los toca | `aws budgets delete-budget --budget-name <n>` |
+
+Los topics de debug que se habían creado en la tanda de diagnóstico:
 
 | Topic | Qué era |
 |---|---|
@@ -284,24 +335,21 @@ Restos conocidos de esa tanda:
 | `journal-api-eb-probe-1793881174` | sonda de captura |
 | `journal-api-scratch-policy-test` | prueba de policy de SNS |
 
-> Estos topics ya no aparecen en `list-topics` (se verificaron y se borraron
-> los que quedaban), pero **sus suscripciones** sí sobreviven en
-> `list-subscriptions`, incluso con estado `PendingConfirmation`. Una
-> suscripción `PendingConfirmation` **impide borrar el topic**: hay que
+> Estos topics ya no aparecen en `list-topics`, pero **sus suscripciones** sí
+> sobreviven en `list-subscriptions`, incluso con estado `PendingConfirmation`.
+> Una suscripción `PendingConfirmation` **impide borrar el topic**: hay que
 > confirmar o cancelar la suscripción primero.
 
 ```bash
 # 1. Ver las suscripciones colgadas
 aws sns list-subscriptions --query 'Subscriptions[].{Topic:TopicArn,Arn:SubscriptionArn}' --output json
 
-# 2. Cancelar las pendientes (PendingConfirmation no se puede desuscribir con
-#    el ARN; hay que confirmar la suscripción por email o borrarla con el ARN
-#    completo del topic)
-aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:607856468834:journal-api-alarms \
-  --query 'Subscriptions[].SubscriptionArn' --output json
+# 2. Cancelar las confirmadas (por ARN)
+aws sns unsubscribe --subscription-arn arn:aws:sns:us-east-1:607856468834:journal-api-eb-debug-1793879895:6e47366c-...
 
-# 3. Borrar el topic
-aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:607856468834:journal-api-alarms
+# 3. Las PendingConfirmation no se pueden desuscribir por API: se borra el
+#    topic, y el registro de la suscripción lo limpia AWS solo
+aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:607856468834:journal-api-scratch-policy-test
 ```
 
 **Colas SQS**: los topics de debug apuntaban a colas SQS temporales. Se
@@ -349,18 +397,47 @@ Copy-Item terraform.tfstate.backup "$env:USERPROFILE\journal-api-terraform.tfsta
 
 ### 5.3 Plan, y solo después apply
 
+> **Ojo con el comando.** `terraform plan` a secas compara el estado con la
+> configuración y da `No changes`: para ver lo que se va a borrar hay que
+> pedir el destroy explícitamente con `-destroy`.
+
 ```powershell
 cd D:\programacion\pythonPracticas\journal-starter\terraform
-terraform plan -no-color
+terraform plan -no-color -destroy
 ```
 
 El plan tiene que mostrar **solo eliminaciones**. Si muestra cambios o
 creaciones, hay una discrepancia entre el estado y la realidad: investigar
 antes de seguir.
 
+Medido el 2026-11-06:
+
+```
+Plan: 0 to add, 0 to change, 98 to destroy.
+```
+
 ```powershell
 terraform destroy -auto-approve
 ```
+
+La primera pasada destruyó 98 recursos y **falló en el último**, el repo de
+ECR (§3.4):
+
+```
+Error: ECR Repository (journal-api) not empty, consider using force_delete:
+operation error ECR: DeleteRepository, ... RepositoryNotEmptyException
+```
+
+Terraform no es atómico: había destruido todo lo demás y había actualizado el
+estado con lo que sí se borró. Con las imágenes borradas, la segunda pasada
+terminó el trabajo:
+
+```
+aws_ecr_repository.journal_api: Destruction complete after 1s
+Destroy complete! Resources: 1 destroyed.
+```
+
+Total: **99 recursos destruidos**.
 
 Durante el destroy, los recursos se borran en este orden (por el grafo de
 dependencias de Terraform):
@@ -381,7 +458,15 @@ El EIP **se libera**, no se destruye: vuelve al pool de IPs públicas de AWS.
 | Recurso | Por qué sobrevive | Cómo limpiarlo |
 |---|---|---|
 | Clave KMS | 30 días de deletion window | sola, a los 30 días; o `schedule-key-deletion --pending-window-in-days 7` |
-| Secretos de Secrets Manager | 7 días de recovery window | `aws secretsmanager delete-secret --secret-id <id> --recovery-window-in-days 0` (inmediato) o `--force-delete-without-recovery` || EIP liberada | vuelve al pool de AWS | nada que hacer |
+| Secretos de Secrets Manager | 7 días de recovery window | `aws secretsmanager delete-secret --secret-id <arn> --force-delete-without-recovery` (inmediato) |
+| EIP liberada | vuelve al pool de AWS | nada que hacer |
+
+> **Ojo con el flag de los secretos.** `--recovery-window-in-days 0` **no
+> sirve**: la API lo rechaza con `InvalidParameterException: The
+> RecoveryWindowInDays value must be between 7 and 30 days`. El flag correcto
+> es `--force-delete-without-recovery`, que manda el booleano
+> `ForceDeleteWithoutRecovery` y borra el secreto en el acto. Verificado el
+> 2026-11-06: los dos secretos quedaron purgados de verdad.
 
 ---
 
@@ -438,25 +523,113 @@ terraform plan -no-color
 # esperado: "No changes" (o que no queden recursos en el estado)
 ```
 
+### 6.1 Resultado medido el 2026-11-06
+
+Todo verificado con las mismas APIs, después del destroy:
+
+| Recurso | Resultado |
+|---|---|
+| Instancias EC2 | `i-0d3f04316b63ee928` en estado `terminated` (AWS la purga de la lista en ~1 h; el volumen se borró con ella) |
+| Elastic IP | ninguna (`eipalloc-0e21b90d7b6c06d58` liberada) |
+| VPC / subnets / security groups | ninguna / ninguna / ninguno |
+| S3 buckets | ninguno (los dos borrados) |
+| CloudTrail | ninguno |
+| KMS | `008c6620-6709-42f8-be2e-2ecd1245487f` en `PendingDeletion` (30 días, no se factura); el alias `alias/journal-api-audit` ya no está |
+| Log groups / alarmas / dashboards | ninguno / ninguna / ninguno |
+| Topics SNS | ninguno |
+| Suscripciones SNS | solo 1 `PendingConfirmation` colgada (la limpia AWS sola, §4.1) |
+| Colas SQS | ninguna |
+| IAM roles del proyecto | ninguno (tampoco el `journal-ssm-role`, ni el perfil de instancia, ni el OIDC provider de GitHub) |
+| ECR | ningún repo |
+| AWS Config | sin recorder, 0 reglas |
+| SSM parameters | ninguno |
+| Secrets Manager | ninguno visible (los dos purgados sin ventana de recuperación) |
+| EventBridge | ninguna regla |
+| Presupuestos | ninguno |
+| Terraform | `state list` vacío (0 recursos, 0 outputs) |
+| La API | `curl https://3.215.52.10.sslip.io/version` → timeout (la instancia ya no existe) |
+
+> Un `terraform plan` **a secas** después del destroy muestra lo que se
+> volvería a *crear* si alguien hiciera `apply` (porque el estado está vacío
+> y la configuración sigue ahí). Eso es lo esperado, no un resto: no hay
+> ningún recurso vivo en la cuenta.
+
 ---
 
 ## 7. Checklist de ejecución
 
-- [ ] **Gate humano**: la verificación de fase 6 pasó y alguien lo confirmó.
-- [ ] Snapshot de `terraform.tfstate` y `.backup` fuera del repo.
-- [ ] `aws cloudtrail stop-logging --name journal-api-audit` → `IsLogging: False`.
-- [ ] `aws config stop-configuration-recorder` → `recording: False`.
-- [ ] Bucket del trail vacío (versiones **y** delete markers = 0).
-- [ ] Bucket de Config vacío (versiones **y** delete markers = 0).
-- [ ] `terraform plan` muestra solo eliminaciones.
-- [ ] `terraform destroy -auto-approve`.
-- [ ] Secretos borrados sin ventana de recuperación (si se quiere todo ya).
-- [ ] KMS: verificación de la ventana de 30 días, o acelerado a 7 días.
-- [ ] Restos de §4 (subscriptions, topics, colas) borrados.
-- [ ] Verificación final de §6: todo vacío.
-- [ ] Los presets de GitHub (los tres repos: `journal-starter`,
+- [x] **Gate humano**: la verificación de fase 6 pasó y alguien lo confirmó.
+- [x] Snapshot de `terraform.tfstate` y `.backup` fuera del repo.
+- [x] `aws cloudtrail stop-logging --name journal-api-audit` → `IsLogging: False`.
+- [x] `aws config stop-configuration-recorder` → `recording: False`.
+- [x] Bucket del trail vacío (versiones **y** delete markers = 0) → 6051 versiones.
+- [x] Bucket de Config vacío (versiones **y** delete markers = 0) → 56 versiones.
+- [x] `terraform plan -destroy` muestra solo eliminaciones → `0 to add, 0 to change, 98 to destroy`.
+- [x] `terraform destroy -auto-approve` → 99 recursos (2 pasadas; la primera falló en ECR, §3.4).
+- [x] Secretos borrados sin ventana de recuperación (`--force-delete-without-recovery`).
+- [x] KMS: verificación de la ventana de 30 días, o acelerado a 7 días.
+- [x] Restos de §4 borrados: 4 suscripciones SNS confirmadas, 2 parámetros
+      SSM y 2 presupuestos. Queda 1 suscripción `PendingConfirmation` sin
+      borrar (la limpia AWS sola, §4.1).
+- [x] Verificación final de §6: todo vacío (§6.1).
+- [x] Los presets de GitHub (los tres repos: `journal-starter`,
       `journal-starter-pipeline` y `journal-starter-fork`) quedan sin tocar: son
-      del capstone, no de la cuenta de AWS. El pipeline dejará de funcionar
-      solo, porque el rol de OIDC y el provider quedan destruidos.
-- [ ] Los presupuestos de AWS se borran con el destroy; los avisos de
-      presupuesto dejan de llegar (mismo efecto).
+      del capstone, no de la cuenta de AWS. El pipeline dejó de funcionar
+      solo, porque el rol de OIDC y el provider quedaron destruidos.
+- [x] Los presupuestos de AWS borrados **a mano**: no estaban en Terraform,
+      así que el `destroy` no los tocó (§4.1). Los avisos de presupuesto
+      dejan de llegar (mismo efecto).
+
+---
+
+## 8. Registro de ejecución
+
+**2026-11-06.** Ejecución completa del procedimiento, en este orden:
+
+| # | Paso | Resultado |
+|---|---|---|
+| 1 | Gate: `curl /version` | `{"commit":"2da28daf23515836c32c98d258c26f587206e7ad"}` → se siguió |
+| 2 | Snapshot del estado | `%USERPROFILE%\journal-api-terraform.tfstate.bak` y `.backup.bak` |
+| 3 | `cloudtrail stop-logging` | `IsLogging: False` |
+| 4 | `config stop-configuration-recorder` | `recording: False` |
+| 5 | Vaciado de buckets | trail: 6051 versiones · Config: 56 versiones → ambos dan 0 |
+| 6 | `terraform plan -destroy` | `0 to add, 0 to change, 98 to destroy` |
+| 7 | `terraform destroy` (1ª pasada) | destruyó 98, **falló en ECR** (`RepositoryNotEmptyException`) |
+| 8 | `batch_delete_image` | 66 imágenes borradas, 0 restantes |
+| 9 | `terraform destroy` (2ª pasada) | `Destroy complete! Resources: 1 destroyed.` |
+| 10 | Restos de §4 | 4 suscripciones SNS, 2 parámetros SSM, 2 presupuestos |
+| 11 | Secretos | purgados con `--force-delete-without-recovery` |
+| 12 | Verificación (§6.1) | todo vacío salvo la clave KMS en `PendingDeletion` y 1 suscripción pendiente |
+
+**Lo que queda vivo, y por qué no cuesta nada:**
+
+- La clave KMS `008c6620-...` en `PendingDeletion` durante 30 días. Una clave
+  pendiente de borrado **no se factura**; desaparece sola. Los datos que
+  cifró quedan ilegibles, que es justamente lo que se quería: el trail ya no
+  existe.
+- Una suscripción SNS en `PendingConfirmation`, con un topic que ya no
+  existe. AWS no expone API para borrar una suscripción sin confirmar y la
+  purga sola en ~3 días. No se factura.
+
+**Efecto colateral esperado: el CI queda en rojo.** El pipeline despliega a
+AWS, y a AWS ya no hay a qué desplegar: el job `build` falla al no existir el
+repo de ECR y el `deploy` al no existir la instancia. Eso no es un pipeline
+roto: es la señal de que hay que correr `terraform apply` antes de empujar.
+El job `test` sigue pasando, y CodeQL también: no dependen de AWS.
+
+**Lo que aprendió el procedimiento de esta ejecución** (todo corregido en
+este mismo documento):
+
+1. Faltaba el caso de **ECR**: el repo no tiene `force_delete` y no se puede
+   borrar con imágenes dentro (§3.4).
+2. El plan del destroy se pide con **`-destroy`**; un `terraform plan` a
+   secas da `No changes` y no muestra las eliminaciones (§5.3).
+3. El comando de conteo de versiones con `length(Versions) + length(...)` es
+   **JMESPath inválido** (§3.1).
+4. Los **presupuestos no estaban en Terraform**: el `destroy` no los borra
+   (§4.1).
+5. Para purgar un secreto de verdad el flag es
+   **`--force-delete-without-recovery`**, no `--recovery-window-in-days 0`,
+   que la API rechaza (§5.4).
+6. Un `destroy` **no es atómico**: si falla a mitad de camino, el estado
+   queda con lo ya destruido y hay que correrlo otra vez (§5.3).

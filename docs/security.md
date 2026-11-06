@@ -13,6 +13,15 @@ procedimiento paso a paso ante una fuga de credenciales),
 
 ## 1. Qué hay desplegado
 
+> **Estado (2026-11-06).** Todo lo de esta tabla **estuvo desplegado** y se
+> desmontó ese mismo día, con el gate humano de [cleanup.md](cleanup.md) §5.1.
+> Los controles siguen en el código (`terraform/security.tf`,
+> `terraform/config.tf`, `.github/workflows/`), pero en la cuenta
+> `607856468834` no queda ningún recurso vivo: ni trail, ni buckets, ni
+> reglas de Config, ni alarmas, ni log groups. La clave KMS quedó en
+> `PendingDeletion` durante 30 días. Para volver a levantarlo: `terraform
+> apply` en `terraform/`.
+
 | Control | Recurso | Qué resuelve |
 |---|---|---|
 | Audit trail | `aws_cloudtrail.audit` | Quién hizo qué en la cuenta |
@@ -967,7 +976,9 @@ El bucket tiene `force_destroy = false`: el trail es evidencia y no debería
 borrarse con un `terraform destroy`. Para destruir el stack hay que vaciar
 el bucket primero.
 
-El procedimiento completo está en [cleanup.md](cleanup.md).
+El procedimiento completo está en [cleanup.md](cleanup.md), y **se ejecutó** el
+2026-11-06: el bucket del trail tenía **6051 versiones** y el de Config **56**,
+las dos vaciadas a mano después de apagar el trail y el recorder.
 
 ---
 
@@ -1068,6 +1079,11 @@ Medido el 2026-11-05 con `aws ce get-cost-and-usage` (mes en curso):
 | AWS Glue | $0 |
 | AWS Secrets Manager | $0 |
 | **Total** | **$0,00** |
+
+> **Después del cleanup (2026-11-06) el consumo es cero por definición**: no
+> queda ningún recurso del proyecto en la cuenta. La tabla de arriba es el
+> costo *con* el entorno desplegado, que es el dato relevante para decidir
+> si el proyecto es "gratis" o no.
 
 Y el uso del free tier (`aws freetier get-free-tier-usage`): los nueve
 usos del proyecto son **"Always Free"** (gratis permanente, no una
@@ -1186,7 +1202,7 @@ correo que el resto de las alarmas.
 ### 9.2 Checklist de seguridad del capstone
 
 El checklist de nueve ítems del capstone, con el estado **verificado** (no
-supuesto) al 2026-11-05:
+supuesto) al 2026-11-06:
 
 | # | Ítem | Estado | Dónde está la evidencia |
 |---|---|---|---|
@@ -1197,7 +1213,7 @@ supuesto) al 2026-11-05:
 | 5 | Audit logging con retención ≥ 90 días | ✅ | CloudTrail con KMS, digest, eventos globales y S3 a 365 días; la copia consultable en CloudWatch Logs con **90 días** de retención |
 | 6 | Alerta de seguridad | ✅ | 4 alarmas sobre el trail; disparo verificado end-to-end (llegaron los correos) — §3 y §10 |
 | 7 | Security scanning | ✅ | CodeQL con run verde en `main` en el repo canónico `journal-starter` y en el espejo; Dependabot con 4 PRs; 2 alertas de CodeQL triadas y 0 abiertas — §5 |
-| 8 | Limpieza de recursos | ⏸️ **Preparada, no ejecutada** | Procedimiento completo en **[cleanup.md](cleanup.md)**. No se ejecutó porque la plataforma de evaluación sondea la API viva: el `destroy` requiere confirmación explícita |
+| 8 | Limpieza de recursos | ✅ **Ejecutada** | Procedimiento completo en **[cleanup.md](cleanup.md)** y ejecutado el 2026-11-06, después de que la verificación de la plataforma pasara: 99 recursos destruidos, los dos buckets vaciados a mano (6107 versiones), 66 imágenes de ECR borradas y los restos que Terraform no conoce limpiados. La API ya no está desplegada |
 | 9 | Retrospectiva | ✅ | **[retrospective.md](retrospective.md)**: qué se implementó, qué se haría distinto y los aprendizajes |
 
 Los tres puntos que no son un ✅simple:
@@ -1211,8 +1227,11 @@ Los tres puntos que no son un ✅simple:
 - **El 4 necesitó un arreglo en el mecanismo de despliegue**, no solo en el
   archivo: un cambio en el ConfigMap de Caddy no llegaba al proceso que lo
   lee (§7). El header se verificó en vivo después del fix.
-- **El 8 está escrito y verificado en seco, pero no ejecutado** por la razón
-  del gate humano que está en `cleanup.md` §5.1.
+- **El 8 se ejecutó**, y no sin más: la plataforma de evaluación sondea la
+  API viva, así que hubo un gate humano explícito antes de destruir
+  (`cleanup.md` §5.1). El destroy no fue atómico —falló en el repo de ECR y
+  necesitó una segunda pasada— y el procedimiento quedó corregido con los
+  seis huecos que aparecieron en la ejecución.
 
 ---
 
@@ -1280,7 +1299,7 @@ aws config get-compliance-summary-by-config-rule
 - [observability.md](observability.md): métricas y alarmas de la aplicación.
 - [delivery.md](delivery.md): cadena de entrega y verificación commit ↔ imagen ↔ `/version`.
 - [network-isolation.md](network-isolation.md): qué está realmente aislado en la red y qué no (la desviación del ítem 3 del checklist).
-- [cleanup.md](cleanup.md): el procedimiento para desmontar todo lo desplegado (check 8), escrito y **no ejecutado**.
+- [cleanup.md](cleanup.md): el procedimiento para desmontar todo lo desplegado (check 8), **ejecutado** el 2026-11-06.
 - [retrospective.md](retrospective.md): la retrospectiva del bloque de seguridad (check 9).
 - [evidence-security-incident-response.md](evidence-security-incident-response.md): la verificación de todo lo de este documento, con la salida real de los comandos.
 - [AWS CloudTrail User Guide](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-concepts.html).

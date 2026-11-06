@@ -2,6 +2,19 @@
 
 [![CI](https://github.com/amarillaRodrigo/journal-starter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/amarillaRodrigo/journal-starter/actions/workflows/ci.yml)
 
+> **⚠️ Estado de la infraestructura (2026-11-06):** el entorno de AWS de este
+> capstone fue **desmontado** —el ítem 8 del checklist, ejecutado después de
+> que la verificación de la plataforma pasara—. La API pública ya no responde
+> y la cuenta quedó sin recursos del proyecto. Todo el código, la IaC y la
+> documentación siguen acá: para volver a levantarlo, `terraform apply` en
+> `terraform/` y `scripts/deploy-k8s.sh`. El registro del desmontaje está en
+> [docs/cleanup.md](docs/cleanup.md) §8.
+>
+> **El CI queda en rojo a propósito después del desmontaje**: el job `build`
+> falla al no existir el repo de ECR y el `deploy` al no existir la instancia.
+> Eso no es un pipeline roto: es la señal de que hay que aplicar la IaC
+> primero. El job `test` sigue pasando.
+
 Welcome to [Learn to Cloud's](https://learntocloud.com) Phase 3 capstone. You will be guided to building a journal API with **FastAPI**, **PostgreSQL**, structured logging, input validation, and AI-powered entry analysis.
 
 ## Capstone
@@ -184,8 +197,8 @@ Deployment, operación y diagnóstico del entorno desplegado:
 - [Evidencia de seguridad](docs/evidence-security-incident-response.md):
   verificación end-to-end del bloque de monitoreo y respuesta a incidentes.
 - [Procedimiento de limpieza](docs/cleanup.md): cómo desmontar todo lo
-  desplegado en la cuenta, en orden y con sus bloqueos. **Escrito y no
-  ejecutado**: el `destroy` requiere confirmación explícita.
+  desplegado en la cuenta, en orden y con sus bloqueos. **Ejecutado** el
+  2026-11-06: 99 recursos destruidos y la cuenta sin recursos del proyecto.
 - [Retrospectiva](docs/retrospective.md): qué se implementó, qué se haría
   distinto y los aprendizajes del bloque de seguridad.
 

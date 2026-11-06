@@ -390,13 +390,41 @@ si está mal en tu código. Y cuando la respuesta es "no, está en el formato qu
 cambió solo" o "está en el del otro", la salida no es pelear con el síntoma: es
 mover lo tuyo a donde el síntoma no aplica.
 
+### 4.5 Un `destroy` no es atómico, y el procedimiento escrito nunca es el real
+
+El cleanup estaba escrito, verificado en seco, con tres bloqueos identificados
+y un gate humano. Se ejecutó el 2026-11-06 y aparecieron **seis** cosas que
+el procedimiento no tenía:
+
+1. El repo de **ECR** no tiene `force_delete`: no se puede borrar con 68
+   imágenes dentro, y el destroy falla con `RepositoryNotEmptyException`.
+2. El plan del destroy se pide con `terraform plan -destroy`; un
+   `terraform plan` a secas da `No changes` y no muestra eliminaciones.
+3. El comando de conteo de versiones usaba `length(Versions) + length(...)`,
+   que no es JMESPath válido.
+4. Los **presupuestos no estaban en Terraform**: el destroy no los tocó.
+5. Purgar un secreto de verdad necesita `--force-delete-without-recovery`;
+   `--recovery-window-in-days 0` lo rechaza la API.
+6. El **destroy no es atómico**: falló en el último recurso, con 98 ya
+   destruidos, y el estado quedó con lo que sí se borró. Se corrió una segunda
+   vez y terminó el trabajo.
+
+Lo interesante no es la lista: es que **un procedimiento verificado en seco
+sigue sin ser el procedimiento real**, porque "en seco" significa que nadie
+lo ejecutó contra el mundo. Las seis correcciones están en `docs/cleanup.md`,
+con el registro de la ejecución en §8.
+
+Y lo segundo: **el destroy tiene que ser reentrante**. Escribí el
+procedimiento como una lista de pasos, y el plan B —que resultó ser el real—
+no estaba escrito en ningún lado: correr `terraform destroy` otra vez y seguir.
+
 ---
 
 ## 5. Lo que queda
 
 | Ítem | Estado | Dónde |
 |---|---|---|
-| Ejecución del cleanup | **Pendiente**, a la espera del gate humano | `docs/cleanup.md` |
+| Ejecución del cleanup | **Hecho** el 2026-11-06, con gate humano explícito | `docs/cleanup.md` §8 (registro de ejecución) |
 | Cerrar el desvío del ítem 3 (subnet privada) | Documentado, no implementado | `docs/network-isolation.md` §5 |
 | Activar GuardDuty | Requiere método de pago | `terraform/security.tf` (flag `enable_guardduty`) |
 | Migrar las alertas a EventBridge | Pendiente: el trail **sí** entrega a EventBridge (el diagnóstico anterior era falso) | `docs/security.md` §7 |

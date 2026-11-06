@@ -17,6 +17,14 @@ La operación diaria y los fallos típicos están en [runbook.md](runbook.md); l
 arquitectura y los secretos en [deployment-ec2.md](deployment-ec2.md); la
 telemetría en [observability.md](observability.md).
 
+> **Nota de estado (2026-11-06).** Este documento describe el entorno tal
+> como estaba desplegado. El entorno fue **desmontado** ese mismo día, con el
+> gate humano del que habla [cleanup.md](cleanup.md) §5.1: la API pública ya
+> no responde y el rol de OIDC que usaba el pipeline ya no existe. Los
+> comandos de verificación de abajo son los que se usaron **mientras estaba
+> vivo**; para volver a levantarlo hay que correr `terraform apply` en
+> `terraform/` y después el pipeline, que reconstruye el ECR y el cluster.
+
 ## 1. Cadena de entrega
 
 ```text
